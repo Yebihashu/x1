@@ -212,12 +212,13 @@ def transform_to_parameters(m : np.array) -> TransformParams:
     #   roll = atan2(m[1,2] / sz, m[1,1] / sy)   
     #   yaw = 0             
     
-    m[:3,:3] = TMP_At @ m[:3,:3] @ TMP_A
+    _m = m.copy()
+    _m[:3,:3] = TMP_At @ _m[:3,:3] @ TMP_A
 
     # extract scale, according to https://math.stackexchange.com/questions/237369/given-this-transformation-matrix-how-do-i-decompose-it-into-translation-rotati
-    sx_vec = np.array([m[0,0], m[1,0], m[2,0]])
-    sy_vec = np.array([m[0,1], m[1,1], m[2,1]])
-    sz_vec = np.array([m[0,2], m[1,2], m[2,2]])
+    sx_vec = np.array([_m[0,0], _m[1,0], _m[2,0]])
+    sy_vec = np.array([_m[0,1], _m[1,1], _m[2,1]])
+    sz_vec = np.array([_m[0,2], _m[1,2], _m[2,2]])
     
     # calc vector magnitudes
     sx = np.sqrt(sx_vec.dot(sx_vec))
@@ -225,26 +226,26 @@ def transform_to_parameters(m : np.array) -> TransformParams:
     sz = np.sqrt(sz_vec.dot(sz_vec))
 
     # extract yaw/pitch/roll
-    sp = m[2,0] / sx
+    sp = _m[2,0] / sx
     
     r = 0.0
     p = math.asin(sp)
     y = 0.0
     
     if sp > 0.9999:
-       r = math.atan2(m[1,2] / sz, m[1,1] / sy)   
+       r = math.atan2(_m[1,2] / sz, _m[1,1] / sy)   
        y = 0
     else:
-       r = math.atan2(-m[2,1] / sy, m[2,2] / sz)   
-       y = math.atan2(m[1,0] / sx, m[0,0] / sx)              
+       r = math.atan2(-_m[2,1] / sy, _m[2,2] / sz)   
+       y = math.atan2(_m[1,0] / sx, _m[0,0] / sx)              
     
     #return [m[0,3], m[1,3], m[2,3], r*180.0/math.pi, p*180.0/math.pi, y*180.0/math.pi, sx, sy, sz]
     #def __init__(self, x=0.0,y=0.0,z=0.0,roll=0.0,pitch=0.0,yaw=0.0, sx=1.0, sy=1.0, sz=1.0):
 
-    
-    return TransformParams(x=m[0,3],
-                                          y=m[1,3],
-                                          z=m[2,3],
+
+    return TransformParams(x=_m[0,3],
+                                          y=_m[1,3],
+                                          z=_m[2,3],
                                           roll=-r*180.0/math.pi, 
                                           pitch=-p*180.0/math.pi,
                                           yaw=y*180.0/math.pi, 
