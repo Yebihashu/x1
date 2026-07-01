@@ -4,6 +4,8 @@ from pathlib import Path
 import itertools
 import threading
 import collections
+import queue
+import atexit
 import math
 import numpy as np
 from grx import grx_math
@@ -27,7 +29,10 @@ general
 10. Functions that tends to be called from player.update() function must be synced within the rendering thread
     in order to allow fast and smooth rendering and responding to user input,
     do not wait , but push commands to a queue and let the rendering thread handle them.
-
+11. All grx_lib objects uses log that allows queuing out log messages  with desired colors quickly without delaying the process,  
+    a logger that runs in different thread will ta care to handle the queuing and printing of the messages.
+    the logger can be configured to print to stdout, file, or both. (default is stdout only - so terminal in cursor can see the messages)
+    you can use a logger form known package or implement your own , but importance is the performance of grx_lib rendering and responding to user input.
 
 Architecture - threading & the command queue
 ---------------------------------------------
@@ -79,6 +84,130 @@ _GRX_PANDA_BASIS = np.array([[1.0, 0.0, 0.0, 0.0],
                              [0.0, 0.0, 1.0, 0.0],
                              [0.0, 1.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+# =====================================================================
+# Logger (design item 11)
+# ---------------------------------------------------------------------
+# A non-blocking, threaded logger. Producers (any grx_lib object, possibly on
+# the rendering thread) call ``log()`` which only pushes a message onto a
+# thread-safe queue and returns immediately - it never does I/O, so it never
+# stalls rendering or input handling. A dedicated background thread drains the
+# queue and prints (with ANSI colors) to stdout, a file, or both.
+# =====================================================================
+class Logger:
+    """A background-thread logger that never blocks the caller.
+
+    Args:
+        to_stdout : if True, messages are printed to stdout (default True).
+        file_path : if given, messages are also appended to this file.
+    """
+
+    _COLORS = {
+        "red": "\033[31m",
+        "green": "\033[32m",
+        "blue": "\033[34m",
+        "yellow": "\033[33m",
+        "magenta": "\033[35m",
+        "cyan": "\033[36m",
+        "white": "\033[37m",
+        "bright_red": "\033[91m",
+        "bright_green": "\033[92m",
+        "bright_blue": "\033[94m",
+        "bright_yellow": "\033[93m",
+        "bright_magenta": "\033[95m",
+        "bright_cyan": "\033[96m",
+        "bright_white": "\033[97m",
+    }
+    _RESET = "\033[0m"
+
+    def __init__(self, to_stdout: bool = True, file_path: Optional[Union[str, Path]] = None):
+        self._queue: "queue.Queue" = queue.Queue()
+        self._to_stdout = to_stdout
+        self._file = open(file_path, "a", encoding="utf-8") if file_path else None
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="grx-logger", daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def log(self, message: object, color: str = "white") -> None:
+        """Queue a message for output. Non-blocking; returns immediately."""
+        if self._closed:
+            return
+        self._queue.put((str(message), color))
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:  # sentinel -> stop
+                    return
+                message, color = item
+                self._emit(message, color)
+            finally:
+                self._queue.task_done()
+
+    def _emit(self, message: str, color: str) -> None:
+        if self._to_stdout:
+            code = self._COLORS.get(color, self._COLORS["white"])
+            print(f"{code}{message}{self._RESET}")
+        if self._file is not None:
+            self._file.write(message + "\n")
+            self._file.flush()
+
+    def flush(self) -> None:
+        """Block until all queued messages have been written."""
+        self._queue.join()
+
+    def configure(self, to_stdout: Optional[bool] = None,
+                  file_path: Optional[Union[str, Path]] = None) -> None:
+        """Reconfigure output sinks. Flushes pending messages first."""
+        self.flush()
+        if to_stdout is not None:
+            self._to_stdout = to_stdout
+        if file_path is not None:
+            if self._file is not None:
+                self._file.close()
+            self._file = open(file_path, "a", encoding="utf-8")
+
+    def stop(self) -> None:
+        """Flush and stop the logger thread (idempotent)."""
+        if self._closed:
+            return
+        self._closed = True
+        self.flush()
+        self._queue.put(None)
+        self._thread.join(timeout=1.0)
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+# Default process-wide logger (stdout only, created lazily on first use).
+_default_logger: Optional[Logger] = None
+_logger_lock = threading.Lock()
+
+
+def get_logger() -> Logger:
+    """Return the process-wide default logger, creating it on first use."""
+    global _default_logger
+    if _default_logger is None:
+        with _logger_lock:
+            if _default_logger is None:
+                _default_logger = Logger(to_stdout=True)
+    return _default_logger
+
+
+def set_logger(logger: Logger) -> None:
+    """Replace the process-wide default logger."""
+    global _default_logger
+    _default_logger = logger
+
+
+def log(message: object, color: str = "white") -> None:
+    """Queue a message on the default logger. Non-blocking."""
+    get_logger().log(message, color)
+
 
 # =====================================================================
 # Transform helpers (column major, point transform is  M @ vector)
@@ -139,6 +268,41 @@ def relative_transform(object_transform: np.ndarray, reference_transform: np.nda
     result = inv(reference_transform) @ object_transform
     """
     return np.linalg.inv(np.asarray(reference_transform, dtype=np.float64)) @ np.asarray(object_transform, dtype=np.float64)
+
+
+def camera_look_at_transform(position: List[float],
+                             look_at: List[float],
+                             up: List[float] = (0.0, 1.0, 0.0)) -> np.ndarray:
+    """Build a grx transform for an object placed at ``position`` looking at ``look_at``.
+
+    Uses the grx camera convention: local +z (front) points toward ``look_at``,
+    local +y is up (as close as possible to ``up``), local +x is right. This is a
+    left handed frame (x=right, y=up, z=front), so right = up x front.
+    """
+    position = np.asarray(position, dtype=np.float64)[:3]
+    look_at = np.asarray(look_at, dtype=np.float64)[:3]
+    up_v = np.asarray(up, dtype=np.float64)[:3]
+
+    front = look_at - position
+    front_norm = np.linalg.norm(front)
+    if front_norm < 1e-12:
+        raise ValueError("position and look_at must differ")
+    front = front / front_norm
+
+    right = np.cross(up_v, front)
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-12:
+        raise ValueError("up direction is parallel to the look direction")
+    right = right / right_norm
+
+    true_up = np.cross(front, right)
+
+    m = np.eye(4, dtype=np.float64)
+    m[:3, 0] = right      # x = right
+    m[:3, 1] = true_up    # y = up
+    m[:3, 2] = front      # z = front
+    m[:3, 3] = position
+    return m
 
 
 def _grx_to_panda_mat4(transform: np.ndarray):
@@ -428,6 +592,29 @@ class PinHoleCamera(Camera):
         return math.degrees(2.0 * math.atan2(self.height / 2.0, self.focal))
 
 
+class OrthographicCamera(Camera):
+    """An orthographic camera.
+
+    ``width`` and ``height`` are the rendered image size in pixels. ``film_width``
+    and ``film_height`` are the orthographic view extents in meters (world units);
+    when omitted they default to matching the pixel size at 100 px/meter.
+    Looks along +z (front) with +y up, following the grx coordinate system.
+    """
+
+    def __init__(self,
+                 name: Optional[str] = None,
+                 transform: Optional[np.ndarray] = None,
+                 parent_object: Optional[SceneObject] = None,
+                 width: int = 600,
+                 height: int = 400,
+                 film_width: Optional[float] = None,
+                 film_height: Optional[float] = None):
+        super().__init__(name=name, transform=transform, parent_object=parent_object,
+                         width=width, height=height)
+        self.film_width = float(film_width) if film_width is not None else width / 100.0
+        self.film_height = float(film_height) if film_height is not None else height / 100.0
+
+
 # =====================================================================
 # Lights
 # =====================================================================
@@ -582,10 +769,13 @@ class Viewer:
     def __init__(self,
                  name: str,
                  scene: Scene,
-                 camera: Union[Camera, str, None] = None):
+                 camera: Union[Camera, str, None] = None,
+                 headless: bool = False):
         self.name = name
         self.scene = scene
         self.camera = camera
+        # headless: render to an offscreen buffer instead of opening a window.
+        self.headless = bool(headless)
         self.background_color: Color = list(WHITE)
         self.grid_size: float = 1.0
         self.grid_color: Color = list(LIGHT_GRAY)
@@ -593,7 +783,8 @@ class Viewer:
         self._enabled: bool = True
         self._engine: Optional["_RenderEngine"] = None
         # Panda3D window / display objects, created by the engine.
-        self._window = None
+        self._output = None       # GraphicsOutput (offscreen buffer or window)
+        self._texture = None      # RAM-copy color Texture (headless)
         self._camera_np = None
         self._grid_np = None
 
@@ -627,10 +818,6 @@ class Viewer:
         """Show (True) or hide (False) the viewer."""
         self._enabled = bool(enable)
         self._enqueue(lambda: self._engine.apply_enabled(self))
-
-
-# kept lowercase too for compatibility with the stub spelling
-viewer = Viewer
 
 
 # =====================================================================
@@ -720,6 +907,87 @@ class ShooterUserNavigator(UserNavigator):
         new_world[:3, 3] = position
         camera.set_transform(new_world, reference_object=None)
 
+# =====================================================================
+# images buffer
+# =====================================================================
+class ImagesBuffer:
+    """A pre-allocated buffer for a set of images.
+
+    Purpose: fastest possible storage of frames coming from viewers at realtime,
+    keeping them for later tasks without stalling the renderer. For example:
+
+    * Example 1: analysis after playing. The application requests each frame (say
+      100 frames), then closes the player and analyses the frames afterwards.
+    * Example 2: realtime image processing, where processing can run over the
+      buffer data, avoiding copies.
+
+    The buffer is allocated once at construction. It can hand out a writable
+    reference to a specific image slot, copy all images to a CPU numpy array, and
+    report how many images it holds.
+
+    Note:
+        This implementation stores frames in a contiguous CPU numpy array, which
+        is enough for the current needs and keeps the API stable. The storage
+        backend can later be swapped for a GPU (e.g. torch/CUDA) buffer without
+        changing this interface.
+    """
+
+    def __init__(self,
+                 num_images: int,
+                 width: int,
+                 height: int,
+                 channels: int = 3,
+                 dtype=np.uint8):
+        if num_images <= 0:
+            raise ValueError("num_images must be positive")
+        self._num_images = int(num_images)
+        self._width = int(width)
+        self._height = int(height)
+        self._channels = int(channels)
+        self._dtype = np.dtype(dtype)
+        # shape: (N, H, W, C) - the natural layout for image data
+        self._data = np.zeros((self._num_images, self._height, self._width, self._channels),
+                              dtype=self._dtype)
+
+    @property
+    def num_images(self) -> int:
+        return self._num_images
+
+    @property
+    def image_shape(self):
+        """Return the (height, width, channels) of each image."""
+        return (self._height, self._width, self._channels)
+
+    def _check_index(self, index: int) -> bool:
+        if index < 0 or index >= self._num_images:
+            log(f"ImagesBuffer: image index {index} out of range [0, {self._num_images})", "red")
+            return False
+        return True
+
+    def image_reference(self, index: int) -> Optional[np.ndarray]:
+        """Return a writable view of the image slot at ``index`` (no copy).
+
+        Returns None (and logs an error) if the index is out of range.
+        """
+        if not self._check_index(index):
+            return None
+        return self._data[index]
+
+    def write_image(self, index: int, image: np.ndarray) -> bool:
+        """Write ``image`` into the slot at ``index``. Returns False if invalid."""
+        if not self._check_index(index):
+            return False
+        image = np.asarray(image)
+        if image.shape != (self._height, self._width, self._channels):
+            log(f"ImagesBuffer: image shape {image.shape} does not match "
+                f"buffer shape {(self._height, self._width, self._channels)}", "red")
+            return False
+        self._data[index] = image
+        return True
+
+    def copy_to_cpu(self) -> np.ndarray:
+        """Return a CPU numpy copy of all images, shape (N, H, W, C)."""
+        return self._data.copy()
 
 # =====================================================================
 # Player
@@ -742,7 +1010,7 @@ class player:
 
     # ---- to be implemented by subclasses -------------------------------
     def _update(self) -> None:
-        """Update scene, viewers, objects.
+        """ Is called before rendering a frame. allowing update scene, viewers, objects, etc
 
         Functions called here must be synced with the rendering thread (use the
         scene/viewer/player API which pushes to the command queue). Implemented by
@@ -790,6 +1058,39 @@ class player:
             for v in self.viewers.values():
                 v.enable(enable)
 
+    def get_viewer_image(self, view_name: str, buffers: ImagesBuffer, image_index: int) -> bool:
+        """Copy the latest rendered image of a viewer into ``buffers[image_index]``.
+
+        Reads the viewer's rendered pixels, so it must be called on the rendering
+        thread (i.e. from ``_update()``). Returns False (and logs) if the index is
+        out of range or no rendered image is available yet.
+        """
+        if self._engine is None:
+            log("get_viewer_image: engine is not running", "red")
+            return False
+        if view_name not in self.viewers:
+            log(f"get_viewer_image: no viewer named {view_name!r}", "red")
+            return False
+        if image_index < 0 or image_index >= buffers.num_images:
+            log(f"get_viewer_image: image index {image_index} out of range", "red")
+            return False
+
+        viewer_obj = self.viewers[view_name]
+        image = self._engine.read_viewer_image(viewer_obj)
+        if image is None:
+            log(f"get_viewer_image: viewer {view_name!r} has no rendered image yet", "red")
+            return False
+        return buffers.write_image(image_index, image)
+
+    def exit(self) -> None:
+        """Stop the player: drain the command queue and end the rendering loop.
+
+        Safe to call from ``_update()``. The remaining queued commands are applied,
+        background threads (logger) are flushed, and ``run()`` returns.
+        """
+        if self._engine is not None:
+            self._engine.request_exit()
+
 
 # =====================================================================
 # Rendering engine (Panda3D). Owns the command queue and the render thread.
@@ -810,33 +1111,50 @@ class _RenderEngine:
         self._keys_down: Dict[str, bool] = {}
         self._scene_roots: Dict[int, object] = {}  # id(scene) -> NodePath
         self._last_time: float = 0.0
+        self._exit_requested: bool = False
 
     # ---- thread-safe entry point ---------------------------------------
     def enqueue(self, command: Callable[[], None]) -> None:
         self.command_queue.append(command)
 
+    def request_exit(self) -> None:
+        """Ask the render loop to stop after the current frame (thread-safe)."""
+        self._exit_requested = True
+
     def _drain(self) -> None:
-        queue = self.command_queue
+        command_queue = self.command_queue
         while True:
             try:
-                command = queue.popleft()
+                command = command_queue.popleft()
             except IndexError:
                 break
             try:
                 command()
             except Exception as exc:  # never let a bad command kill the renderer
-                print(f"[grx] command failed: {exc}")
+                log(f"[grx] command failed: {exc}", "red")
 
     # ---- lifecycle ------------------------------------------------------
     def start(self) -> None:
+        from panda3d.core import loadPrcFileData
+
+        viewers = list(self.player.viewers.values())
+        all_headless = bool(viewers) and all(v.headless for v in viewers)
+        if all_headless:
+            # no on-screen window: render into offscreen buffers only.
+            loadPrcFileData("grx-headless", "window-type offscreen")
+            loadPrcFileData("grx-headless", "audio-library-name null")
+
         from direct.showbase.ShowBase import ShowBase
         from panda3d.core import NodePath, PandaNode
 
         self.base = ShowBase()
-        self.base.disableMouse()  # we drive the camera ourselves
+        try:
+            self.base.disableMouse()  # we drive the camera ourselves
+        except Exception:
+            pass
 
-        # wire the engine to every scene / viewer so their API can enqueue
-        for viewer_obj in self.player.viewers.values():
+        # wire the engine to every scene / viewer, and build scene roots.
+        for viewer_obj in viewers:
             viewer_obj._engine = self
             scene = viewer_obj.scene
             scene._engine = self
@@ -849,14 +1167,17 @@ class _RenderEngine:
                 for obj in scene.objects():
                     self._build_object_visual(scene, obj)
 
-        for viewer_obj in self.player.viewers.values():
-            self.apply_background(viewer_obj)
-            self.apply_grid(viewer_obj)
+        # per-viewer render targets (offscreen buffer or window) + cameras.
+        for viewer_obj in viewers:
+            self._setup_viewer(viewer_obj)
 
         self._install_input()
         self._last_time = 0.0
         self.base.taskMgr.add(self._frame_task, "grx_frame_task", sort=-50)
+        log("[grx] engine started", "bright_green")
         self.base.run()
+        # base.run() returns only after the loop is stopped (request_exit).
+        self._teardown()
 
     def _frame_task(self, task):
         dt = task.time - self._last_time
@@ -872,18 +1193,40 @@ class _RenderEngine:
         except NotImplementedError:
             pass
         except Exception as exc:
-            print(f"[grx] player._update failed: {exc}")
+            log(f"[grx] player._update failed: {exc}", "red")
         self._drain()
         # 3) run navigators
         for navigator in self.player._navigators:
             try:
                 navigator.update(self, dt)
             except Exception as exc:
-                print(f"[grx] navigator failed: {exc}")
+                log(f"[grx] navigator failed: {exc}", "red")
         self._drain()
+        # 4) sync each viewer's camera transform from the data model
+        for viewer_obj in self.player.viewers.values():
+            self._update_viewer_camera_transform(viewer_obj)
 
         self._reset_mouse_delta()
+
+        # 5) honor an exit request: drain once more, then stop the loop.
+        if self._exit_requested:
+            self._drain()
+            self.base.taskMgr.stop()
+            return task.done
         return task.cont
+
+    def _teardown(self) -> None:
+        """Clean up Panda3D resources and flush the logger (after the loop)."""
+        try:
+            get_logger().flush()
+        except Exception:
+            pass
+        try:
+            if self.base is not None:
+                self.base.destroy()
+        except Exception:
+            pass
+        log("[grx] engine stopped", "bright_green")
 
     # ---- input ----------------------------------------------------------
     def _install_input(self):
@@ -929,6 +1272,90 @@ class _RenderEngine:
                 continue
         return None
 
+    def _resolve_camera(self, viewer_obj: Viewer) -> Optional[Camera]:
+        camera = viewer_obj.camera
+        if camera is None:
+            return None
+        if isinstance(camera, Camera):
+            return camera
+        try:
+            resolved = viewer_obj.scene.get_object(camera)
+        except KeyError:
+            return None
+        return resolved if isinstance(resolved, Camera) else None
+
+    # ---- per-viewer render target setup (render thread) ----------------
+    def _setup_viewer(self, viewer_obj: Viewer) -> None:
+        from panda3d.core import Texture
+
+        camera = self._resolve_camera(viewer_obj)
+        width = camera.width if camera is not None else 640
+        height = camera.height if camera is not None else 480
+        scene_root = self._scene_roots[id(viewer_obj.scene)]
+
+        if viewer_obj.headless:
+            texture = Texture(f"{viewer_obj.name}_tex")
+            buffer = self.base.win.makeTextureBuffer(f"{viewer_obj.name}_buffer",
+                                                     width, height, texture, True)
+            buffer.setSort(-100)
+            viewer_obj._output = buffer
+            viewer_obj._texture = texture
+            camera_np = self.base.makeCamera(buffer, scene=scene_root)
+        else:
+            viewer_obj._output = self.base.win
+            viewer_obj._texture = None
+            camera_np = self.base.makeCamera(self.base.win, scene=scene_root)
+
+        # position the panda camera in world space (not under base.camera)
+        camera_np.reparentTo(self.base.render)
+        viewer_obj._camera_np = camera_np
+
+        self._apply_lens(viewer_obj, camera, camera_np)
+        self.apply_background(viewer_obj)
+        self.apply_grid(viewer_obj)
+        self._update_viewer_camera_transform(viewer_obj)
+
+    def _apply_lens(self, viewer_obj: Viewer, camera: Optional[Camera], camera_np) -> None:
+        from panda3d.core import OrthographicLens, PerspectiveLens
+
+        if isinstance(camera, OrthographicCamera):
+            lens = OrthographicLens()
+            lens.setFilmSize(camera.film_width, camera.film_height)
+            camera_np.node().setLens(lens)
+        elif isinstance(camera, PinHoleCamera):
+            lens = PerspectiveLens()
+            lens.setAspectRatio(camera.width / float(camera.height))
+            lens.setFov(camera.vertical_fov_deg() * camera.width / float(camera.height),
+                        camera.vertical_fov_deg())
+            camera_np.node().setLens(lens)
+        # otherwise keep Panda's default lens
+
+    def _update_viewer_camera_transform(self, viewer_obj: Viewer) -> None:
+        if viewer_obj._camera_np is None:
+            return
+        camera = self._resolve_camera(viewer_obj)
+        if camera is None:
+            return
+        viewer_obj._camera_np.setMat(_grx_to_panda_mat4(camera.world_transform()))
+
+    def read_viewer_image(self, viewer_obj: Viewer) -> Optional[np.ndarray]:
+        """Read the viewer's latest rendered pixels as an (H, W, 3) uint8 array."""
+        texture = viewer_obj._texture
+        if texture is None or not texture.hasRamImage():
+            return None
+        xsize = texture.getXSize()
+        ysize = texture.getYSize()
+        ram = texture.getRamImageAs("RGB")
+        if ram is None:
+            return None
+        raw = ram.getData() if hasattr(ram, "getData") else bytes(ram)
+        array = np.frombuffer(raw, dtype=np.uint8)
+        if array.size != xsize * ysize * 3:
+            return None
+        array = array.reshape(ysize, xsize, 3)
+        # Panda stores images bottom-to-top; flip to top-to-bottom.
+        return np.ascontiguousarray(array[::-1])
+
     # ---- visual commands (render thread) -------------------------------
     def create_visual(self, scene: Scene, obj: SceneObject) -> None:
         self._build_object_visual(scene, obj)
@@ -955,9 +1382,14 @@ class _RenderEngine:
                 obj._nodepath = None
 
     def apply_background(self, viewer_obj: Viewer) -> None:
-        if self.base is None:
-            return
-        self.base.setBackgroundColor(*viewer_obj.background_color)
+        from panda3d.core import LColor
+        color = LColor(*viewer_obj.background_color)
+        output = viewer_obj._output
+        if output is not None:
+            output.setClearColor(color)
+            output.setClearColorActive(True)
+        elif self.base is not None:
+            self.base.setBackgroundColor(color)
 
     def apply_grid(self, viewer_obj: Viewer) -> None:
         scene = viewer_obj.scene
@@ -981,10 +1413,14 @@ class _RenderEngine:
             scene._render_root.hide()
 
     def save_snapshot(self, view_name: str, image_path: Path) -> None:
-        if self.base is None:
+        if self.base is None or view_name not in self.player.viewers:
+            return
+        viewer_obj = self.player.viewers[view_name]
+        output = viewer_obj._output
+        if output is None:
             return
         image_path.parent.mkdir(parents=True, exist_ok=True)
-        self.base.win.saveScreenshot(str(image_path))
+        output.saveScreenshot(str(image_path))
 
 
 # =====================================================================
@@ -1101,13 +1537,15 @@ def _make_grid_nodepath(name: str, cell_size: float, color: Color, half_count: i
 
 __all__ = [
     "hello",
+    "Logger", "get_logger", "set_logger", "log",
     "identity_transform", "as_transform", "translation_transform",
     "axis_angle_transform", "compose", "inverse_transform", "relative_transform",
+    "camera_look_at_transform",
     "SceneObject", "Cube", "Arrow", "arrow", "Axes", "axes",
-    "Camera", "PinHoleCamera",
+    "Camera", "PinHoleCamera", "OrthographicCamera",
     "SceneLightObject", "SunLightObject",
-    "Scene", "Viewer", "viewer",
+    "Scene", "Viewer",
     "UserNavigator", "ShooterUserNavigator",
-    "player",
+    "ImagesBuffer", "player",
     "WHITE", "LIGHT_GRAY", "RED", "GREEN", "BLUE",
 ]
