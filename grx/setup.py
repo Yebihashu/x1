@@ -21,6 +21,11 @@ setup(
     package_dir={'': 'source'},                         # consider the folder as source (othewise the package will be source.sim instaed of sim). 
     packages=['grx'],           # contains sim functionalities only.  
     package_data={'' : ['data/**/*'],},                 # contains sim data    
+    install_requires=[
+        "numpy",
+        "scipy",
+        "panda3d",
+    ],
     #packages=find_packages(where="source"),
     #include_package_data=True,
     #package_data={"simnext": ["data/*", "data/**/*"]},
