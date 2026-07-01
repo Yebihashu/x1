@@ -160,14 +160,16 @@ def parameters_to_transform(params : TransformParams) -> np.array:
                    ])
     m[:3,:3] = TMP_A @ m[:3,:3] @ TMP_At
     a = np.array([[1,2,3],
-              [4,5,6],
-              [7,8,9]])
-
+                  [4,5,6],
+                  [7,8,9]])
     print(TMP_A @ a @ TMP_At)
+    [[5. 6. 4.]
+     [8. 9. 7.]
+     [2. 3. 1.]]
     """
 
 
-    m = np.array([  [(sw*sp*sr+cw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, (sw*cp)*sx, tx],
+    m = np.array([  [(sw*sp*sr+cw*cr)*sy, (-sw*sp*cr+cw*sr)*sz, (sw*cp)*sx, tx],
                     [(-cp*sr)*sy,         (cp*cr)*sz,           sp*sx,      ty],
                     [(cw*sp*sr-sw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, (cw*cp)*sx, tz],
                     [0,          0,                   0,                    1 ] 
@@ -229,6 +231,7 @@ def transform_to_parameters(m : np.array) -> TransformParams:
     
     _m = m.copy()
     _m[:3,:3] = TMP_At @ _m[:3,:3] @ TMP_A
+
 
     # extract scale, according to https://math.stackexchange.com/questions/237369/given-this-transformation-matrix-how-do-i-decompose-it-into-translation-rotati
     sx_vec = np.array([_m[0,0], _m[1,0], _m[2,0]])
