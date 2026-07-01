@@ -6,7 +6,7 @@ import threading
 import collections
 import math
 import numpy as np
-
+from grx import grx_math
 """
 Design
 ==================================================
@@ -108,22 +108,15 @@ def translation_transform(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> np.
 def axis_angle_transform(axis: List[float], angle_deg: float) -> np.ndarray:
     """Return a 4x4 rotation transform of ``angle_deg`` degrees about ``axis``.
 
-    Uses the Rodrigues formula. ``axis`` need not be normalized.
+    Uses ``grx_math.rotation_vector_to_rotation_matrix``. ``axis`` need not be normalized.
     """
     v = np.asarray(axis, dtype=np.float64)[:3]
     norm = np.linalg.norm(v)
     if norm < 1e-12:
         return np.eye(4, dtype=np.float64)
-    k = v / norm
     theta = math.radians(angle_deg)
-    kx, ky, kz = k
-    K = np.array([[0.0, -kz, ky],
-                  [kz, 0.0, -kx],
-                  [-ky, kx, 0.0]], dtype=np.float64)
-    R3 = np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
-    R = np.eye(4, dtype=np.float64)
-    R[:3, :3] = R3
-    return R
+    rotation_vector = (v / norm) * theta
+    return grx_math.rotation_vector_to_rotation_matrix(rotation_vector)
 
 
 def compose(*transforms: np.ndarray) -> np.ndarray:
@@ -160,7 +153,28 @@ def _grx_to_panda_mat4(transform: np.ndarray):
     return LMatrix4f(*row_major.flatten().tolist())
 
 def _panda_mat4_to_grx(transform: np.ndarray):
-    raise NotImplementedError("Not implemented yet")
+    """Convert a Panda3D matrix (row-vector convention) to grx column-major 4x4.
+
+    Accepts Panda3D ``LMatrix4f``/``LMatrix4d`` or a numpy-like 4x4 row-major matrix.
+    """
+    if hasattr(transform, "getCell"):
+        # Panda matrix type (LMatrix4f/LMatrix4d)
+        row_major = np.array(
+            [[transform.getCell(r, c) for c in range(4)] for r in range(4)],
+            dtype=np.float64,
+        )
+    else:
+        row_major = np.asarray(transform, dtype=np.float64)
+        if row_major.shape == (16,):
+            row_major = row_major.reshape((4, 4))
+        if row_major.shape != (4, 4):
+            raise ValueError(f"transform must be a 4x4 matrix, got shape {row_major.shape}")
+
+    # Reverse of _grx_to_panda_mat4:
+    #   row_major = panda.T
+    #   panda = B @ grx @ B
+    panda = row_major.T
+    return _GRX_PANDA_BASIS @ panda @ _GRX_PANDA_BASIS
 
 
 # =====================================================================
