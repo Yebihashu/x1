@@ -152,14 +152,29 @@ def parameters_to_transform(params : TransformParams) -> np.array:
     ty = params.y
     tz = params.z
 
+    """
     m = np.array([  [(cw*cp)*sx, (cw*sp*sr-sw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, tx],
                     [(sw*cp)*sx, (sw*sp*sr+cw*cr)*sy, (-sw*sp*cr+cw*sr)*sz, ty],
                     [sp*sx,      (-cp*sr)*sy,         (cp*cr)*sz,           tz],
                     [0,          0,                   0,                    1 ] 
                    ])
-
-    
     m[:3,:3] = TMP_A @ m[:3,:3] @ TMP_At
+    a = np.array([[1,2,3],
+              [4,5,6],
+              [7,8,9]])
+
+    print(TMP_A @ a @ TMP_At)
+    """
+
+
+    m = np.array([  [(sw*sp*sr+cw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, (sw*cp)*sx, tx],
+                    [(-cp*sr)*sy,         (cp*cr)*sz,           sp*sx,      ty],
+                    [(cw*sp*sr-sw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, (cw*cp)*sx, tz],
+                    [0,          0,                   0,                    1 ] 
+                   ])
+                       
+    
+    
     return m
 
 def transform_to_parameters(m : np.array) -> TransformParams:  
