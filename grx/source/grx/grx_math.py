@@ -32,10 +32,8 @@ yaw   - around y - positive right
 
 
 CLOSE_TO_ZERO = 0.000001
-TMP_A = np.array([[0, 1, 0],
-                  [0, 0, 1],
-                  [1, 0, 0]], dtype=np.float64 )                   
-TMP_At = TMP_A.transpose()
+
+
 
 
 class Point():    
@@ -153,6 +151,12 @@ def parameters_to_transform(params : TransformParams) -> np.array:
     tz = params.z
 
     """
+    Mapping from sim cs to grx cs
+    TMP_A = np.array([[0, 1, 0],
+                  [0, 0, 1],
+                  [1, 0, 0]], dtype=np.float64 )                   
+    TMP_At = TMP_A.transpose()
+
     m = np.array([  [(cw*cp)*sx, (cw*sp*sr-sw*cr)*sy, (-cw*sp*cr-sw*sr)*sz, tx],
                     [(sw*cp)*sx, (sw*sp*sr+cw*cr)*sy, (-sw*sp*cr+cw*sr)*sz, ty],
                     [sp*sx,      (-cp*sr)*sy,         (cp*cr)*sz,           tz],
@@ -229,14 +233,30 @@ def transform_to_parameters(m : np.array) -> TransformParams:
     #   roll = atan2(m[1,2] / sz, m[1,1] / sy)   
     #   yaw = 0             
     
+    
+    """
+    Mapping from grx cs to sim cs 
+
     _m = m.copy()
     _m[:3,:3] = TMP_At @ _m[:3,:3] @ TMP_A
 
+    a = np.array([[1,2,3],
+                  [4,5,6],
+                  [7,8,9]])
+    print(TMP_At @ a @ TMP_A)
+    [[9. 7. 8.]
+    [3. 1. 2.]
+    [6. 4. 5.]]    
+    """
 
     # extract scale, according to https://math.stackexchange.com/questions/237369/given-this-transformation-matrix-how-do-i-decompose-it-into-translation-rotati
-    sx_vec = np.array([_m[0,0], _m[1,0], _m[2,0]])
-    sy_vec = np.array([_m[0,1], _m[1,1], _m[2,1]])
-    sz_vec = np.array([_m[0,2], _m[1,2], _m[2,2]])
+    # We use index remapping equivalent to TMP_At @ _m[:3,:3] @ TMP_A:
+    # [[1,2,3],     [[9,7,8],
+    #  [4,5,6],  ->  [3,1,2],
+    #  [7,8,9]]      [6,4,5]]
+    sx_vec = np.array([m[2,2], m[0,2], m[1,2]])
+    sy_vec = np.array([m[2,0], m[0,0], m[1,0]])
+    sz_vec = np.array([m[2,1], m[0,1], m[1,1]])
     
     # calc vector magnitudes
     sx = np.sqrt(sx_vec.dot(sx_vec))
@@ -244,26 +264,26 @@ def transform_to_parameters(m : np.array) -> TransformParams:
     sz = np.sqrt(sz_vec.dot(sz_vec))
 
     # extract yaw/pitch/roll
-    sp = _m[2,0] / sx
+    sp = m[1,2] / sx
     
     r = 0.0
     p = math.asin(sp)
     y = 0.0
     
     if sp > 0.9999:
-       r = math.atan2(_m[1,2] / sz, _m[1,1] / sy)   
+       r = math.atan2(m[0,1] / sz, m[0,0] / sy)   
        y = 0
     else:
-       r = math.atan2(-_m[2,1] / sy, _m[2,2] / sz)   
-       y = math.atan2(_m[1,0] / sx, _m[0,0] / sx)              
+       r = math.atan2(-m[1,0] / sy, m[1,1] / sz)   
+       y = math.atan2(m[0,2] / sx, m[2,2] / sx)              
     
     #return [m[0,3], m[1,3], m[2,3], r*180.0/math.pi, p*180.0/math.pi, y*180.0/math.pi, sx, sy, sz]
     #def __init__(self, x=0.0,y=0.0,z=0.0,roll=0.0,pitch=0.0,yaw=0.0, sx=1.0, sy=1.0, sz=1.0):
 
 
-    return TransformParams(x=_m[0,3],
-                                          y=_m[1,3],
-                                          z=_m[2,3],
+    return TransformParams(x=m[0,3],
+                                          y=m[1,3],
+                                          z=m[2,3],
                                           roll=-r*180.0/math.pi, 
                                           pitch=-p*180.0/math.pi,
                                           yaw=y*180.0/math.pi, 
