@@ -7,6 +7,7 @@ y - up
 z - front
 
 ### Rotation directions:
+(left hand rule)
 roll  - around z - positive is counter clock wise
 pitch - around x - positive is down
 yaw   - around y - positive right 

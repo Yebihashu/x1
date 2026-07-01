@@ -80,11 +80,6 @@ _GRX_PANDA_BASIS = np.array([[1.0, 0.0, 0.0, 0.0],
                              [0.0, 1.0, 0.0, 0.0],
                              [0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
 
-
-def hello():
-    print("Hello world!")
-
-
 # =====================================================================
 # Transform helpers (column major, point transform is  M @ vector)
 # =====================================================================
@@ -163,6 +158,9 @@ def _grx_to_panda_mat4(transform: np.ndarray):
     panda = _GRX_PANDA_BASIS @ np.asarray(transform, dtype=np.float64) @ _GRX_PANDA_BASIS
     row_major = np.ascontiguousarray(panda.T)
     return LMatrix4f(*row_major.flatten().tolist())
+
+def _panda_mat4_to_grx(transform: np.ndarray):
+    raise NotImplementedError("Not implemented yet")
 
 
 # =====================================================================

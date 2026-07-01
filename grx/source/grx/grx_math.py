@@ -30,6 +30,7 @@ yaw   - around y - positive right
 
 """
 
+### ============= follow code was testsed and fit for GRX =============================
 
 CLOSE_TO_ZERO = 0.000001
 
@@ -292,6 +293,120 @@ def transform_to_parameters(m : np.array) -> TransformParams:
                                           sz=sz)
 
 
+def rotation_vector_to_rotation_matrix(rotation_vector : np.array) -> np.array:
+    """
+    convert rodrigus rotation vector (v=θk) to rotation matrix
+    Args:
+        rotation_vector : v=θk - 3d vector where its direction is the rotation axis, and its length is the rotation angle in radians.
+                                 positive rotation angle is according to left hand rule, counter clock wise  when looking towards the axis tip                                  
+    Returns:
+        4x4 homogeniouse rotation matrix
+    """
+    # Rodrigues in GRX cs:
+    # R = cos(theta) * I + sin(theta) * K + (1-cos(theta)) * (k*k^T)
+    #            |  0  -kz   ky |
+    # where K =  |  kz   0  -kx |
+    #            | -ky  kx   0  |
+    angle = np.linalg.norm(rotation_vector)
+    if abs(angle) < 1e-6:
+        return np.eye(4, dtype=np.float64) 
+    k = rotation_vector/angle
+
+    # calculation in GRX cs
+    kx = k[0]
+    ky = k[1]
+    kz = k[2]       
+    K = np.array([[    0, -kz,  ky],
+                  [   kz,   0, -kx],
+                  [  -ky,  kx,   0]])
+    I = np.identity(3, dtype=np.float64)
+    R3 = math.cos(angle)*I + math.sin(angle)*K + (1-math.cos(angle))*(k.reshape(3,1).dot(k.reshape(1,3)))
+    R = np.identity(4, dtype=np.float64)
+
+    R[:3,:3] = R3
+    return R
+
+def rotation_matrix_to_rotation_vector(rotation_matrix : np.array) -> np.array:
+    """
+    convert rotation matrix to  rodrigus rotation vector (v=θk) 
+    Args:
+        rotation_matirx : 4x4 homogeniouse (translation is ignored) or 3x3 rotation matrix
+    Returns:
+        rotation vector - 3d vector where its direction is the rotation axis, and its length is the rotation angle in radians.
+                          positive rotation angle is CCW when looking down the axis toward origin
+    """
+    # if rotation matrix contains scale 
+    #if np.linalg.norm(rotation_matrix[:3,:3] - np.eye(3)) > 1e-6:
+    #    raise ValueError("Rotation matrix has scale")
+
+
+    angle = math.acos(clamp_val((np.trace(rotation_matrix[:3,:3])-1)/2.0, -1.0, 1.0))
+    # if angle is zero, then the rotation vector is arbitrary, so we chose X axis
+    if abs(angle) < 1e-6:
+        return np.array([0.0,0.0,0.0])
+    
+    # if angle is pi or -pi, then the rotation vector should be found in different way
+    # no important for sign, because for 180 degrees rotation, the axis can be in two opposite directions
+    if abs(abs(angle)-math.pi) < 1e-6:
+        kx = math.sqrt((rotation_matrix[0,0]+1)/2.0)
+        ky = math.sqrt((rotation_matrix[1,1]+1)/2.0)
+        kz = math.sqrt((rotation_matrix[2,2]+1)/2.0)
+        k = np.array([kx, ky, kz])
+        # find relative signs of each component:
+        # find index of largest component, we assume this component is positive
+        max_index = np.argmax(k)        
+        # Method 1:
+        # set sign relative to the largest component. sign of 0 will be set as 1        
+        k_relative_signs = np.where(rotation_matrix[:3,max_index]/k[max_index] < 0, -1, 1)
+        k = k * k_relative_signs
+        # Method 2:
+        # off disgonal R values are 2*k[i]*k[j] for angle of 180 degrees
+        #k_max= k[max_index]
+        #k = rotation_matrix[:3,max_index]/(2*k[max_index])
+        #k[max_index] = k_max
+    else:
+        # the normal way 0<angle<pi  or -pi<angle<0
+        # For GRX Rodrigues convention:
+        # R - R^T = 2*sin(angle)*K
+        # K uses k×v, therefore:
+        # kx = (R[2,1]-R[1,2]) / (2*sin(angle))
+        # ky = (R[0,2]-R[2,0]) / (2*sin(angle))
+        # kz = (R[1,0]-R[0,1]) / (2*sin(angle))
+        kx = rotation_matrix[2,1] - rotation_matrix[1,2]
+        ky = rotation_matrix[0,2] - rotation_matrix[2,0]
+        kz = rotation_matrix[1,0] - rotation_matrix[0,1]
+        k = np.array([kx, ky, kz])
+    
+    k = k/np.linalg.norm(k)
+    return k * angle
+
+
+
+
+### ============= follow code taken from SIM package and need to test and to  fit for GRX if not fit =============================
+"""
+# SIM coordinates system is different from GRX coordinates system and when need to fit code, consider the followin SIM vs GRX cs differences:
+# GRX cs is defined in docs/coordinates system.md
+# SIM cs is: 
+SIM system was designed to fit for UnrealEngine5 math.
+Axes directions:
+    x - forward
+    y - right
+    z - up
+
+Rotation directions:
+    pitch (positive up)
+    yaw (positive right)
+    roll (positive is clockwise)
+
+Order of rotations:
+    1. roll
+    2. pitch
+    3. yaw
+"""    
+
+
+
 def object_relative_to_object_transform(object1_transform : np.array, object0_transform : np.array ) -> np.array:
     """ create transform of object1 relative to object0
 
@@ -350,9 +465,9 @@ def follower_object_transform(target_object_world_transform : np.array, distance
     # LT1 - follower Local transform relative to target
     # 
     # WT1 = LT1*WT0
-    tmp_rotation_transform = parameters_to_transform(sim_types.TransformParams(0,0,0,roll = roll, pitch = pitch, yaw=yaw)) 
+    tmp_rotation_transform = parameters_to_transform(TransformParams(0,0,0,roll = roll, pitch = pitch, yaw=yaw)) 
     local_poistion = tmp_rotation_transform.dot(np.array([distance,0,0,1]))
-    local_transform = parameters_to_transform(sim_types.TransformParams(local_poistion[0],local_poistion[1],local_poistion[2],roll = roll, pitch = -pitch, yaw=yaw+180))     
+    local_transform = parameters_to_transform(TransformParams(local_poistion[0],local_poistion[1],local_poistion[2],roll = roll, pitch = -pitch, yaw=yaw+180))     
     world_tranform  = target_object_world_transform.dot(local_transform)
     return world_tranform
 
@@ -656,36 +771,6 @@ def rays_plane_intersection(rays_position_3d : np.array,  rays_direction_3d : np
     return out
 
     
-def rotation_vector_to_rotation_matrix(rotation_vector : np.array) -> np.array:
-    """
-    convert rodrigus rotation vector (v=θk) to rotation matrix
-    Args:
-        rotation_vector : v=θk - 3d vector where its direction is the rotation axis, and its length is the rotation angle in radians.
-                                 positive rotation angle is CCW when looking down the axis toward origin
-    Returns:
-        4x4 homogeniouse rotation matrix
-    """
-    # R=cos(θ)∙I+sin(θ)∙K+(1-cos(θ))∙(k∙k^T )
-    #
-    #            |   0  kz -ky |
-    # where K =  | -kz   0  kx |   
-    #            |  ky -kx   0 |
-    #            
-    angle = np.linalg.norm(rotation_vector)
-    if abs(angle) < 1e-6:
-        return np.eye(4, dtype=np.float64) 
-    k = rotation_vector/angle
-    kx = k[0]
-    ky = k[1]
-    kz = k[2]       
-    K = np.array([[    0,  kz, -ky],
-                  [  -kz,   0,  kx],
-                  [   ky, -kx,   0]])
-    I = np.identity(3, dtype=np.float64)
-    R3 = math.cos(angle)*I + math.sin(angle)*K + (1-math.cos(angle))*(k.reshape(3,1).dot(k.reshape(1,3)))
-    R = np.identity(4, dtype=np.float64)
-    R[:3,:3] = R3
-    return R
 
 def remove_scale_from_transform(transform : np.array) -> np.array:
     """
@@ -715,53 +800,6 @@ def remove_scale_from_transform(transform : np.array) -> np.array:
     return T
 
 
-def rotation_matrix_to_rotation_vector(rotation_matrix : np.array) -> np.array:
-    """
-    convert rotation matrix to  rodrigus rotation vector (v=θk) 
-    Args:
-        rotation_matirx : 4x4 homogeniouse (translation is ignored) or 3x3 rotation matrix
-    Returns:
-        rotation vector - 3d vector where its direction is the rotation axis, and its length is the rotation angle in radians.
-                          positive rotation angle is CCW when looking down the axis toward origin
-    """
-    # if rotation matrix contains scale 
-    #if np.linalg.norm(rotation_matrix[:3,:3] - np.eye(3)) > 1e-6:
-    #    raise ValueError("Rotation matrix has scale")
-
-
-    angle = math.acos(clamp_val((np.trace(rotation_matrix[:3,:3])-1)/2.0, -1.0, 1.0))
-    # if angle is zero, then the rotation vector is arbitrary, so we chose X axis
-    if abs(angle) < 1e-6:
-        return np.array([0.0,0.0,0.0])
-    
-    # if angle is pi or -pi, then the rotation vector should be found in different way
-    # no important for sign, because for 180 degrees rotation, the axis can be in two opposite directions
-    if abs(abs(angle)-math.pi) < 1e-6:
-        kx = math.sqrt((rotation_matrix[0,0]+1)/2.0)
-        ky = math.sqrt((rotation_matrix[1,1]+1)/2.0)
-        kz = math.sqrt((rotation_matrix[2,2]+1)/2.0)
-        k = np.array([kx, ky, kz])
-        # find relative signs of each component:
-        # find index of largest component, we assume this component is positive
-        max_index = np.argmax(k)        
-        # Method 1:
-        # set sign relative to the largest component. sign of 0 will be set as 1        
-        k_relative_signs = np.where(rotation_matrix[:3,max_index]/k[max_index] < 0, -1, 1)
-        k = k * k_relative_signs
-        # Method 2:
-        # off disgonal R values are 2*k[i]*k[j] for angle of 180 degrees
-        #k_max= k[max_index]
-        #k = rotation_matrix[:3,max_index]/(2*k[max_index])
-        #k[max_index] = k_max
-    else:
-        # the normal way 0<angle<pi  or -pi<angle<0
-        kx = rotation_matrix[1,2] - rotation_matrix[2,1]
-        ky = rotation_matrix[2,0] - rotation_matrix[0,2]
-        kz = rotation_matrix[0,1] - rotation_matrix[1,0]
-        k = np.array([kx, ky, kz])
-    
-    k = k/np.linalg.norm(k)
-    return k * angle
 
 def rotation_quaternion_to_rotation_vector(quaternion : np.array, short_path = False) -> np.array:
     """
