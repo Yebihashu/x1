@@ -422,6 +422,24 @@ def rotation_matrix_from_direction(front : np.array,  strive_up : np.array ) -> 
     r[0:3,2] =vz 
     return r
 
+def look_at_transform(position_point : np.array, look_at_point : np.array, strive_up : np.array):
+    """
+    create rotation matrix from front vector, and up that aims as much as possible to strive_up direction.        
+    Args:
+        position_point : a point to look from. Can be 3 elements vector or 4 elements homogeinouse vector 
+        look_at_point  : a point to look at. Can be 3 elements vector or 4 elements homogeinouse vector 
+        strive         : a direction vector of 3 elements aim for direction where the up vector should point as much as possible. 
+    Returns:
+        transform contains translation to position_point, and rotation to look at look_at_point
+        
+    """
+    front =  look_at_point[:3] - position_point[:3]
+    # rotation
+    m =  rotation_matrix_from_direction(front = front,  strive_up = strive_up )
+    # translation
+    m[:3,3] = position_point[:3]
+    
+    return m
 
 ### ============= follow code taken from SIM package and need to test and to  fit for GRX if not fit =============================
 """
@@ -662,24 +680,6 @@ def find_front_back_points(world_points_3d : np.ndarray , object_world_transform
 
 
 
-def look_at_transform(position_point : np.array, look_at_point : np.array, strive_up : np.array):
-    """
-    create rotation matrix from front vector, and up that aims as much as possible to strive_up direction.        
-    Args:
-        position_point : a point to look from. Can be 3 elements vector or 4 elements homogeinouse vector 
-        look_at_point  : a point to look at. Can be 3 elements vector or 4 elements homogeinouse vector 
-        strive         : a direction vector of 3 elements aim for direction where the up vector should point as much as possible. 
-    Returns:
-        transform contains translation to position_point, and rotation to look at look_at_point
-        
-    """
-    front =  look_at_point[:3] - position_point[:3]
-    # rotation
-    m =  rotation_matrix_from_direction(front = front,  strive_up = strive_up )
-    # translation
-    m[:3,3] = position_point[:3]
-    
-    return m
 
 def look_at_transform_by_direction(look_direction : np.array, look_at_point : np.array, distance : float, strive_up : np.array):
     """

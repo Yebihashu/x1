@@ -28,6 +28,10 @@ def test_play__empty_scene():
     camera_transform = grx_lib.camera_look_at_transform(position=[0.0, 1.0, 0.0],
                                                         look_at=[0.0, 0.0, 1.0],
                                                         up=[0.0, 1.0, 0.0])
+    camera_transform = grx_math.camera_look_at_transform(position=[0.0, 1.0, 0.0],
+                                                        look_at=[0.0, 0.0, 1.0],
+                                                        up=[0.0, 1.0, 0.0])
+
     camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
                                         width=width, height=height)
 
