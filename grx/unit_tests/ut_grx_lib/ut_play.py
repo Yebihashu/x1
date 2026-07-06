@@ -31,6 +31,9 @@ def is_white(region):
 def is_blue(region):
     return (np.all(region[:, :, 0] < 10) and np.all(region[:, :, 1] < 10) and np.all(region[:, :, 2] > 245))
 
+def is_red(region):
+    return (np.all(region[:, :, 0] > 245) and np.all(region[:, :, 1] < 10) and np.all(region[:, :, 2] < 10))
+
 def white_center(frame):
     white_mask = np.all(frame > 245, axis=2)
     ys, xs = np.where(white_mask)
@@ -574,6 +577,96 @@ def test_play__cube__yaw_90():
     # sanity: corners far from the cube remain blue
     assert is_blue(frame0[80:100, 180:200]), "frame0 bottom-right corner should stay blue"
     assert is_blue(frame1[0:20, 0:20]), "frame1 top-left corner should stay blue"
+
+
+def test_play__two_views():
+    # create two images buffers, one of size 200x100 pixels, other of size 100x200 pixels, each with one frame
+    # 1. create two views, one with blue background, other with red background
+    # 2. create two orthographics cameras  
+    #    camera 1 : position (0,0,-10) looking at (0,0,0), up=(0,1,0), size of 200x100 pixels, assigned to view 1
+    #    camera 2 : position (10,0,0)  looking at (0,0,0), up=(0,1,0), size of 100x200 pixels, assigned to view 2    
+    # 3. create  white cube os size of (0.5, 0.2, 0.1) , at position (0,0,0), with no rotations
+    # 4. create a play object with update function:
+    #    for the first call - do nothing
+    #    for the second call - copy image from view 1 to buffer 1, image index 0
+    #                          copy image from view 2 to buffer 2, image index 0
+    #                          exit play
+    # 5. verify that the images in the buffers with correct background and correct area of white cube
+
+    # buffers: view1 is 200x100, view2 is 100x200
+    buffer1 = grx_lib.ImagesBuffer(num_images=1, width=200, height=100, channels=3)
+    buffer2 = grx_lib.ImagesBuffer(num_images=1, width=100, height=200, channels=3)
+
+    # 2. two orthographic cameras looking at the origin.
+    #    camera1 looks along +z (forward): right=+x, up=+y -> cube centered in image.
+    #    camera2 looks along -x: right=+z, up=+y -> cube centered in image.
+    camera1_transform = grx_math.look_at_transform(position=np.array([0.0, 0.0, -10.0]),
+                                                   look_at_position=np.array([0.0, 0.0, 0.0]),
+                                                   strive_up=np.array([0.0, 1.0, 0.0]))
+    camera1 = grx_lib.OrthographicCamera(name="cam1", transform=camera1_transform,
+                                         width=200, height=100)
+
+    camera2_transform = grx_math.look_at_transform(position=np.array([10.0, 0.0, 0.0]),
+                                                   look_at_position=np.array([0.0, 0.0, 0.0]),
+                                                   strive_up=np.array([0.0, 1.0, 0.0]))
+    camera2 = grx_lib.OrthographicCamera(name="cam2", transform=camera2_transform,
+                                         width=100, height=200)
+
+    # 3. one shared scene with a single white cube at the origin
+    scene = grx_lib.Scene()
+    cube = grx_lib.Cube(name="cube", size=[0.5, 0.2, 0.1], color=[1.0, 1.0, 1.0, 1.0])
+    scene.spawn_object(cube, transform=grx_lib.translation_transform(0.0, 0.0, 0.0))
+
+    # 1. two views of the same scene, different backgrounds and cameras
+    view1 = grx_lib.Viewer(name="view1", scene=scene, camera=camera1, headless=True)
+    view1.set_background_color(grx_lib.BLUE)
+    view2 = grx_lib.Viewer(name="view2", scene=scene, camera=camera2, headless=True)
+    view2.set_background_color(grx_lib.RED)
+
+    # 4. play: capture both views on the second update, then exit
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers)
+            self.update_calls = 0
+            self.captured = [False, False]
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls >= 2:
+                self.captured[0] = self.get_viewer_image("view1", buffer1, 0)
+                self.captured[1] = self.get_viewer_image("view2", buffer2, 0)
+                self.exit()
+
+    play = Play([view1, view2])
+    play.run()
+
+    assert all(play.captured), "failed to copy one or more viewer images into the buffers"
+
+    frame1 = buffer1.copy_to_cpu()[0]
+    frame2 = buffer2.copy_to_cpu()[0]
+    _debug_save_image(frame1, "test_play__two_views__view1")
+    _debug_save_image(frame2, "test_play__two_views__view2")
+
+    assert frame1.shape == (100, 200, 3)
+    assert frame2.shape == (200, 100, 3)
+
+    # 5a. view1 (blue): cube (0.5m x 0.2m) with a 2.0m x 1.0m film -> ~50x20 px,
+    #     centered -> cols [75,125], rows [40,60].
+    assert is_white(frame1[45:55, 85:115]), "view1 center should be the white cube"
+    assert is_blue(frame1[0:35, :]), "view1 top strip should be blue"
+    assert is_blue(frame1[65:100, :]), "view1 bottom strip should be blue"
+    assert is_blue(frame1[:, 0:65]), "view1 left strip should be blue"
+    assert is_blue(frame1[:, 135:200]), "view1 right strip should be blue"
+
+    # 5b. view2 (red): cube depth/height (0.1m x 0.2m) with a 1.0m x 2.0m film ->
+    #     ~10x20 px, centered -> cols [45,55], rows [90,110].
+    assert is_white(frame2[95:105, 47:53]), "view2 center should be the white cube"
+    assert is_red(frame2[0:80, :]), "view2 top strip should be red"
+    assert is_red(frame2[120:200, :]), "view2 bottom strip should be red"
+    assert is_red(frame2[:, 0:40]), "view2 left strip should be red"
+    assert is_red(frame2[:, 60:100]), "view2 right strip should be red"
+
+
 #====================================================================
 # Running tests maunally
 #====================================================================
