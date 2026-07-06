@@ -269,42 +269,6 @@ def relative_transform(object_transform: np.ndarray, reference_transform: np.nda
     """
     return np.linalg.inv(np.asarray(reference_transform, dtype=np.float64)) @ np.asarray(object_transform, dtype=np.float64)
 
-
-def camera_look_at_transform(position: List[float],
-                             look_at: List[float],
-                             up: List[float] = (0.0, 1.0, 0.0)) -> np.ndarray:
-    """Build a grx transform for an object placed at ``position`` looking at ``look_at``.
-
-    Uses the grx camera convention: local +z (front) points toward ``look_at``,
-    local +y is up (as close as possible to ``up``), local +x is right. This is a
-    left handed frame (x=right, y=up, z=front), so right = up x front.
-    """
-    position = np.asarray(position, dtype=np.float64)[:3]
-    look_at = np.asarray(look_at, dtype=np.float64)[:3]
-    up_v = np.asarray(up, dtype=np.float64)[:3]
-
-    front = look_at - position
-    front_norm = np.linalg.norm(front)
-    if front_norm < 1e-12:
-        raise ValueError("position and look_at must differ")
-    front = front / front_norm
-
-    right = np.cross(up_v, front)
-    right_norm = np.linalg.norm(right)
-    if right_norm < 1e-12:
-        raise ValueError("up direction is parallel to the look direction")
-    right = right / right_norm
-
-    true_up = np.cross(front, right)
-
-    m = np.eye(4, dtype=np.float64)
-    m[:3, 0] = right      # x = right
-    m[:3, 1] = true_up    # y = up
-    m[:3, 2] = front      # z = front
-    m[:3, 3] = position
-    return m
-
-
 def _grx_to_panda_mat4(transform: np.ndarray):
     """Convert a grx column-major 4x4 transform to a Panda3D ``LMatrix4f``.
 
@@ -770,12 +734,17 @@ class Viewer:
                  name: str,
                  scene: Scene,
                  camera: Union[Camera, str, None] = None,
-                 headless: bool = False):
+                 headless: bool = False,
+                 enable_light: bool = False):
         self.name = name
         self.scene = scene
         self.camera = camera
         # headless: render to an offscreen buffer instead of opening a window.
         self.headless = bool(headless)
+        # lighting: default OFF so objects render with their own (flat) colors.
+        # This is important for unit tests that verify rendered geometry, where
+        # light-dependent shading would make exact color checks unreliable.
+        self.enable_light = bool(enable_light)
         self.background_color: Color = list(WHITE)
         self.grid_size: float = 1.0
         self.grid_color: Color = list(LIGHT_GRAY)
@@ -798,6 +767,19 @@ class Viewer:
         """Set the window background color (default white)."""
         self.background_color = list(color)
         self._enqueue(lambda: self._engine.apply_background(self))
+
+    def enable_lights(self, enable: bool) -> None:
+        """Enable or disable lights for this viewer.
+
+        If enable is False, objects render with their own (flat) colors instead of
+        light-computed colors. Applied per viewer, so two viewers of the same scene
+        can independently render lit or unlit. Synced with the rendering thread;
+        can be called from update().
+        """
+        self.enable_light = bool(enable)
+        self._enqueue(lambda: self._engine.apply_lights(self))
+
+
 
     def set_grid(self, size: float, color: Optional[Color] = None) -> None:
         """Set the floor grid (xz plane) cell size and color.
@@ -1313,6 +1295,7 @@ class _RenderEngine:
         self._apply_lens(viewer_obj, camera, camera_np)
         self.apply_background(viewer_obj)
         self.apply_grid(viewer_obj)
+        self.apply_lights(viewer_obj)
         self._update_viewer_camera_transform(viewer_obj)
 
     def _apply_lens(self, viewer_obj: Viewer, camera: Optional[Camera], camera_np) -> None:
@@ -1321,6 +1304,9 @@ class _RenderEngine:
         if isinstance(camera, OrthographicCamera):
             lens = OrthographicLens()
             lens.setFilmSize(camera.film_width, camera.film_height)
+            # generous depth range so objects far from the (orthographic) camera
+            # are not clipped.
+            lens.setNearFar(-100000.0, 100000.0)
             camera_np.node().setLens(lens)
         elif isinstance(camera, PinHoleCamera):
             lens = PerspectiveLens()
@@ -1390,6 +1376,29 @@ class _RenderEngine:
             output.setClearColorActive(True)
         elif self.base is not None:
             self.base.setBackgroundColor(color)
+
+    def apply_lights(self, viewer_obj: Viewer) -> None:
+        """Enable or disable lighting for a viewer via its camera's initial state.
+
+        Applying the light state on the camera (not the shared scene root) keeps
+        lighting per-viewer, so viewers of the same scene can differ. When lighting
+        is off, all lights are forced off and geometry shows its own vertex colors.
+        """
+        from panda3d.core import LightAttrib, RenderState
+
+        camera_np = viewer_obj._camera_np
+        if camera_np is None:
+            return
+        camera_node = camera_np.node()
+
+        if viewer_obj.enable_light:
+            light_attrib = LightAttrib.make()
+            for obj in viewer_obj.scene.objects():
+                if isinstance(obj, SceneLightObject) and obj._nodepath is not None:
+                    light_attrib = light_attrib.addOnLight(obj._nodepath)
+            camera_node.setInitialState(RenderState.make(light_attrib))
+        else:
+            camera_node.setInitialState(RenderState.make(LightAttrib.makeAllOff()))
 
     def apply_grid(self, viewer_obj: Viewer) -> None:
         scene = viewer_obj.scene
@@ -1540,7 +1549,6 @@ __all__ = [
     "Logger", "get_logger", "set_logger", "log",
     "identity_transform", "as_transform", "translation_transform",
     "axis_angle_transform", "compose", "inverse_transform", "relative_transform",
-    "camera_look_at_transform",
     "SceneObject", "Cube", "Arrow", "arrow", "Axes", "axes",
     "Camera", "PinHoleCamera", "OrthographicCamera",
     "SceneLightObject", "SunLightObject",

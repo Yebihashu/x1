@@ -422,7 +422,7 @@ def rotation_matrix_from_direction(front : np.array,  strive_up : np.array ) -> 
     r[0:3,2] =vz 
     return r
 
-def look_at_transform(position_point : np.array, look_at_point : np.array, strive_up : np.array):
+def look_at_transform(position : np.array, look_at_position : np.array, strive_up : np.array):
     """
     create rotation matrix from front vector, and up that aims as much as possible to strive_up direction.        
     Args:
@@ -433,11 +433,11 @@ def look_at_transform(position_point : np.array, look_at_point : np.array, striv
         transform contains translation to position_point, and rotation to look at look_at_point
         
     """
-    front =  look_at_point[:3] - position_point[:3]
+    front =  look_at_position[:3] - position[:3]
     # rotation
     m =  rotation_matrix_from_direction(front = front,  strive_up = strive_up )
     # translation
-    m[:3,3] = position_point[:3]
+    m[:3,3] = position[:3]
     
     return m
 
