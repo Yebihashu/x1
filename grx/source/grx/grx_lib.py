@@ -431,6 +431,9 @@ class SceneObject:
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self._name!r})"
 
+class Pivot(SceneObject):
+    """A mesh-less scene object used purely as a transform/parent (pivot) node."""
+    pass
 
 class Cube(SceneObject):
     """A cube scene object.

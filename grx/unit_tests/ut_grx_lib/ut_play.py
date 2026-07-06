@@ -344,6 +344,236 @@ def test_play__cube__move_xy():
     assert is_blue(frame2[0:50, 100:200]), "frame2 top-right should remain blue"
     assert is_blue(frame2[50:100, 100:200]), "frame2 bottom-right should remain blue"
 
+
+def test_play__cube__roll_90():
+    # 1. create ImagesBuffer of two frames rgb of size 200x100 pixels
+    # 2. create orthographic camera at (0,0,-10) looking at (0,0,0), up=(0,1,0)
+    # 3. create a pivot at the origin, and a child cube:
+    #    cube size=(0.2,0.4,0.1), transform=(0,0.2,0) so its bottom touches pivot center
+    # 4. create headless viewer with blue background
+    # 5. play loop:
+    #    - first rendered frame: capture frame0
+    #    - then roll pivot by +90 deg around z
+    #    - next rendered frame: capture frame1 and exit
+    # 6. verify roll +90 is counterclockwise for camera looking along +z
+    #    (cube moves from top-center to left-center).
+    width, height = 200, 100
+
+    images_buffer = grx_lib.ImagesBuffer(num_images=2, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(position=np.array([0.0, 0.0, -10.0]),
+                                                  look_at_position=np.array([0.0, 0.0, 0.0]),
+                                                  strive_up=np.array([0.0, 1.0, 0.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    pivot = grx_lib.SceneObject(name="pivot")
+    scene.spawn_object(pivot, transform=np.eye(4))
+
+    cube = grx_lib.Cube(name="cube", size=[0.2, 0.4, 0.1], color=[1.0, 1.0, 1.0, 1.0])
+    scene.spawn_object(cube,
+                       transform=grx_lib.translation_transform(0.0, 0.2, 0.0),
+                       parent_object=pivot)
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers)
+            self.update_calls = 0
+            self.captured = [False, False]
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                self.captured[0] = self.get_viewer_image("view", images_buffer, 0)
+                pivot.set_transform(grx_lib.axis_angle_transform([0.0, 0.0, 1.0], 90.0))
+            elif self.update_calls == 3:
+                self.captured[1] = self.get_viewer_image("view", images_buffer, 1)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert all(play.captured), "failed to copy one or more viewer images into the buffer"
+
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__cube__roll_90__frame0")
+    _debug_save_image(images[1], "test_play__cube__roll_90__frame1")
+    assert images.shape == (2, height, width, 3)
+
+    frame0 = images[0]
+    frame1 = images[1]
+    center_x0, center_y0 = white_center(frame0)
+    center_x1, center_y1 = white_center(frame1)
+
+    # frame0: cube is above center (top-center)
+    assert abs(center_x0 - (width / 2.0)) < 10.0, "frame0 cube should be near image center-x"
+    assert center_y0 < (height / 2.0), "frame0 cube should be in the top half"
+
+    # frame1: after +90deg roll around +z, cube moves to left-center
+    assert center_x1 < (width / 2.0), "frame1 cube should be in the left half"
+    assert abs(center_y1 - (height / 2.0)) < 10.0, "frame1 cube should be near image center-y"
+
+    # Counterclockwise evidence in image space: x decreases and y increases.
+    assert center_x1 < center_x0, "after +90 roll, cube should move left"
+    assert center_y1 > center_y0, "after +90 roll, cube should move down toward center"
+
+    # sanity: far opposite corners remain blue
+    assert is_blue(frame0[80:100, 180:200]), "frame0 bottom-right corner should stay blue"
+    assert is_blue(frame1[0:20, 180:200]), "frame1 top-right corner should stay blue"
+
+def test_play__cube__pitch_90():
+    # Same concept as roll_90, but rotate 90deg around x (pitch).
+    # Camera looks from (10,0,0) to the origin so the rotation is seen
+    # counterclockwise in the image.
+    width, height = 200, 100
+
+    images_buffer = grx_lib.ImagesBuffer(num_images=2, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(position=np.array([10.0, 0.0, 0.0]),
+                                                  look_at_position=np.array([0.0, 0.0, 0.0]),
+                                                  strive_up=np.array([0.0, 1.0, 0.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    pivot = grx_lib.SceneObject(name="pivot")
+    scene.spawn_object(pivot, transform=np.eye(4))
+
+    # cube is thin in x, long in y, depth in z is small
+    cube = grx_lib.Cube(name="cube", size=[0.2, 0.4, 0.1], color=[1.0, 1.0, 1.0, 1.0])
+    # place so the cube bottom touches the pivot center
+    scene.spawn_object(cube,
+                       transform=grx_lib.translation_transform(0.0, 0.2, 0.0),
+                       parent_object=pivot)
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers)
+            self.update_calls = 0
+            self.captured = [False, False]
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                self.captured[0] = self.get_viewer_image("view", images_buffer, 0)
+                # Negative pitch here gives a visible counterclockwise motion
+                # from top-center toward left-center in this camera view.
+                pivot.set_transform(grx_lib.axis_angle_transform([1.0, 0.0, 0.0], -90.0))
+            elif self.update_calls == 3:
+                self.captured[1] = self.get_viewer_image("view", images_buffer, 1)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert all(play.captured), "failed to copy one or more viewer images into the buffer"
+
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__cube__pitch_90__frame0")
+    _debug_save_image(images[1], "test_play__cube__pitch_90__frame1")
+    assert images.shape == (2, height, width, 3)
+
+    frame0 = images[0]
+    frame1 = images[1]
+    center_x0, center_y0 = white_center(frame0)
+    center_x1, center_y1 = white_center(frame1)
+
+    # frame0: cube is above center (top-center)
+    assert abs(center_x0 - (width / 2.0)) < 10.0, "frame0 cube should be near image center-x"
+    assert center_y0 < (height / 2.0), "frame0 cube should be in the top half"
+
+    # frame1: after pitch, cube moves to left-center.
+    assert center_x1 < (width / 2.0), "frame1 cube should be in the left half"
+    assert abs(center_y1 - (height / 2.0)) < 10.0, "frame1 cube should be near image center-y"
+
+    # Counterclockwise evidence in image space: x decreases, y increases.
+    assert center_y1 > center_y0, "after +90 pitch, cube should move down toward center"
+    assert center_x1 < center_x0, "after +90 pitch, cube should move left"
+
+    # sanity: far corners stay blue
+    assert is_blue(frame0[80:100, 180:200]), "frame0 bottom-right corner should stay blue"
+    assert is_blue(frame1[0:20, 180:200]), "frame1 top-right corner should stay blue"
+
+
+def test_play__cube__yaw_90():
+    # Same concept as roll_90/pitch_90, but rotate +90deg around y (yaw).
+    # Camera is above the scene at (0,10,0) looking down to the origin, up=(0,0,1).
+    width, height = 200, 100
+
+    images_buffer = grx_lib.ImagesBuffer(num_images=2, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(position=np.array([0.0, 10.0, 0.0]),
+                                                  look_at_position=np.array([0.0, 0.0, 0.0]),
+                                                  strive_up=np.array([0.0, 0.0, 1.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    pivot = grx_lib.SceneObject(name="pivot")
+    scene.spawn_object(pivot, transform=np.eye(4))
+
+    # cube is thin in x, thin in y, and long in z
+    cube = grx_lib.Cube(name="cube", size=[0.2, 0.1, 0.4], color=[1.0, 1.0, 1.0, 1.0])
+    # place so the cube bottom touches the pivot center
+    scene.spawn_object(cube,
+                       transform=grx_lib.translation_transform(0.0, 0.0, 0.2),
+                       parent_object=pivot)
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers)
+            self.update_calls = 0
+            self.captured = [False, False]
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                self.captured[0] = self.get_viewer_image("view", images_buffer, 0)
+                pivot.set_transform(grx_lib.axis_angle_transform([0.0, 1.0, 0.0], 90.0))
+            elif self.update_calls == 3:
+                self.captured[1] = self.get_viewer_image("view", images_buffer, 1)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert all(play.captured), "failed to copy one or more viewer images into the buffer"
+
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__cube__yaw_90__frame0")
+    _debug_save_image(images[1], "test_play__cube__yaw_90__frame1")
+    assert images.shape == (2, height, width, 3)
+
+    frame0 = images[0]
+    frame1 = images[1]
+    center_x0, center_y0 = white_center(frame0)
+    center_x1, center_y1 = white_center(frame1)
+
+    # frame0: cube is above image center (top-center)
+    assert abs(center_x0 - (width / 2.0)) < 10.0, "frame0 cube should be near image center-x"
+    assert center_y0 < (height / 2.0), "frame0 cube should be in the top half"
+
+    # frame1: after +90deg yaw around +y, cube moves to right-center.
+    assert center_x1 > (width / 2.0), "frame1 cube should be in the right half"
+    assert abs(center_y1 - (height / 2.0)) < 10.0, "frame1 cube should be near image center-y"
+
+    # Yaw evidence in image space: x increases and y increases.
+    assert center_x1 > center_x0, "after +90 yaw, cube should move right"
+    assert center_y1 > center_y0, "after +90 yaw, cube should move down toward center"
+
+    # sanity: corners far from the cube remain blue
+    assert is_blue(frame0[80:100, 180:200]), "frame0 bottom-right corner should stay blue"
+    assert is_blue(frame1[0:20, 0:20]), "frame1 top-left corner should stay blue"
 #====================================================================
 # Running tests maunally
 #====================================================================
