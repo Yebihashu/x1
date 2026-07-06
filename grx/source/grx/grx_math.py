@@ -35,8 +35,6 @@ yaw   - around y - positive right
 CLOSE_TO_ZERO = 0.000001
 
 
-
-
 class Point():    
     """
     point structure
@@ -51,7 +49,6 @@ class Point():
     
     def __eq__(self, other): 
         return (self.x == other.x) and (self.y == other.y)
-
 
 class Rect():    
     """
@@ -69,7 +66,6 @@ class Rect():
     
     def __eq__(self, other): 
         return (self.x == other.x) and (self.y == other.y) and (self.w == other.w) and (self.h == other.h)
-
 
 class TransformParams():
     def __init__(self, x=0.0,y=0.0,z=0.0,roll=0.0,pitch=0.0,yaw=0.0, sx=1.0, sy=1.0, sz=1.0):
@@ -98,8 +94,6 @@ class TransformParams():
                 abs(self.sy - other.sy) < accuracy and
                 abs(self.sz - other.sz) < accuracy)
 
-
-
 def clamp_val(x : Real, min_val: Real, max_val: Real) -> Real:
     """
     clamp value to a range
@@ -113,7 +107,6 @@ def clamp_val(x : Real, min_val: Real, max_val: Real) -> Real:
         max_val - if max_val < x
     """
     return max(min_val, min(x, max_val))
-
 
 def parameters_to_transform(params : TransformParams) -> np.array:  
     """
@@ -292,7 +285,6 @@ def transform_to_parameters(m : np.array) -> TransformParams:
                                           sy=sy, 
                                           sz=sz)
 
-
 def rotation_vector_to_rotation_matrix(rotation_vector : np.array) -> np.array:
     """
     convert rodrigus rotation vector (v=θk) to rotation matrix
@@ -380,7 +372,55 @@ def rotation_matrix_to_rotation_vector(rotation_matrix : np.array) -> np.array:
     k = k/np.linalg.norm(k)
     return k * angle
 
+def perpendicular(front : np.array,  strive : np.array ) -> np.array:
+    """
+    Finds a unit vector that is perpendicular to front vector, and aims as much as possible to strive direction.        
+    Args:
+        front        : a vector point to front
+        strive       : a vector aim for direction where the perpendicular should point as much as possible.
+    Returns:
+        perpendicular vector 
+        returns None
+    """
+    # Note: direction of the cross product vector is defined by the right-hand rule.
+    #       this means : Within right hand: vector A is point finger, B is the middle finger, then AxB (turn from A to B) is the thumb direction.   
+    #        
+    #       because our system is left hand, we correct it by minus 
+    v1 = np.cross(front, strive)
+    pv = np.cross(front, v1)
+    a = np.linalg.norm(pv)
+    if 0==a:
+        return np.array([np.nan,np.nan,np.nan])
+    
+    return -pv/a
 
+def rotation_matrix_from_direction(front : np.array,  strive_up : np.array ) -> np.array:
+    """
+    create rotation matrix from front vector, and up that aims as much as possible to strive_up direction.        
+    Args:
+        front        : a vector point to front 
+        strive       : a vector aim for direction where the up vector should point as much as possible. 
+    Returns:
+        perpendicular vector 
+        returns nan if strive direction is like front direction
+    """
+
+    up = perpendicular(front,  strive_up)
+
+    # Note: direction of the cross product vector is defined by the right-hand rule.
+    #       because our system is left hand, we correct it by minus 
+    right = -np.cross(front, up)
+
+    vz = front/np.linalg.norm(front)
+    vx = right/np.linalg.norm(right)
+    vy = up/np.linalg.norm(up)
+
+    r = np.zeros((4,4),dtype=np.float64)
+    r[3,3]=1
+    r[0:3,0] =vx 
+    r[0:3,1] =vy 
+    r[0:3,2] =vz 
+    return r
 
 
 ### ============= follow code taken from SIM package and need to test and to  fit for GRX if not fit =============================
@@ -619,54 +659,7 @@ def find_front_back_points(world_points_3d : np.ndarray , object_world_transform
     return np.where(local_points_3d[0,:] > boundary_distance)[0] , np.where(local_points_3d[0,:] <= boundary_distance)[0]
 
 
-def perpendicular(front : np.array,  strive : np.array ) -> np.array:
-    """
-    Finds a unit vector that is perpendicular to front vector, and aims as much as possible to strive direction.        
-    Args:
-        front        : a vector point to front
-        strive       : a vector aim for direction where the perpendicular should point as much as possible.
-    Returns:
-        perpendicular vector 
-        returns None
-    """
-    # Note: direction of the cross product vector is defined by the right-hand rule.
-    #       because our system is left hand, we correct it by minus 
-    v1 = np.cross(front, strive)
-    pv = np.cross(front, v1)
-    a = np.linalg.norm(pv)
-    if 0==a:
-        return np.array([np.nan,np.nan,np.nan])
-    
-    return -pv/a
 
-
-def rotation_matrix_from_direction(front : np.array,  strive_up : np.array ) -> np.array:
-    """
-    create rotation matrix from front vector, and up that aims as much as possible to strive_up direction.        
-    Args:
-        front        : a vector point to front 
-        strive       : a vector aim for direction where the up vector should point as much as possible. 
-    Returns:
-        perpendicular vector 
-        returns nan if strive direction is like front direction
-    """
-
-    up = perpendicular(front,  strive_up)
-
-    # Note: direction of the cross product vector is defined by the right-hand rule.
-    #       because our system is left hand, we correct it by minus 
-    right = -np.cross(front, up)
-
-    vx = front/np.linalg.norm(front)
-    vy = right/np.linalg.norm(right)
-    vz = up/np.linalg.norm(up)
-
-    r = np.zeros((4,4),dtype=np.float64)
-    r[3,3]=1
-    r[0:3,0] =vx 
-    r[0:3,1] =vy 
-    r[0:3,2] =vz 
-    return r
 
 
 def look_at_transform(position_point : np.array, look_at_point : np.array, strive_up : np.array):
