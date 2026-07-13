@@ -667,6 +667,134 @@ def test_play__two_views():
     assert is_red(frame2[:, 60:100]), "view2 right strip should be red"
 
 
+
+
+def test_play__system_tick__default_tick_duration():
+    """Default system_tick_duration is 1/30 and _run_tick_duration matches."""
+    scene = grx_lib.Scene()
+    camera = grx_lib.OrthographicCamera(name="cam", width=100, height=100)
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+
+    class Play(grx_lib.player):
+        def _update(self):
+            self.exit()
+
+    play = Play([view])
+    assert abs(play.system_tick_duration - 1.0 / 30.0) < 1e-12
+    assert abs(play._run_tick_duration - 1.0 / 30.0) < 1e-12
+    assert play.tick_count == 0
+
+    play_custom = Play([view], system_tick_hz=20.0, run_tick_hz=10.0)
+    assert abs(play_custom.system_tick_duration - 1.0 / 20.0) < 1e-12
+    assert abs(play_custom._run_tick_duration - 1.0 / 10.0) < 1e-12
+
+    play_fast = Play([view], system_tick_hz=60.0, run_tick_hz=0)
+    assert abs(play_fast.system_tick_duration - 1.0 / 60.0) < 1e-12
+    assert play_fast._run_tick_duration == 0.0
+
+
+def test_play__system_tick__tick_count_increments():
+    """tick_count starts at 0 and increments by 1 each frame."""
+    scene = grx_lib.Scene()
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 0.0, -10.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 1.0, 0.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=100, height=100)
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, run_tick_hz=0)
+            self.recorded_ticks = []
+
+        def _update(self):
+            self.recorded_ticks.append(self.tick_count)
+            if len(self.recorded_ticks) >= 5:
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert play.recorded_ticks == [0, 1, 2, 3, 4]
+    assert play.tick_count == 5
+
+
+def test_play__system_tick__navigator_receives_fixed_dt():
+    """Navigators receive system_tick_duration as dt, not wall-clock delta."""
+    scene = grx_lib.Scene()
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 0.0, -10.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 1.0, 0.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=100, height=100)
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+
+    class RecordingNavigator(grx_lib.UserNavigator):
+        def __init__(self):
+            super().__init__()
+            self.dt_values = []
+
+        def update(self, engine, dt):
+            self.dt_values.append(dt)
+
+    nav = RecordingNavigator()
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, system_tick_hz=20.0, run_tick_hz=0)
+            self.attach_user_navigator(nav)
+            self.frame_count = 0
+
+        def _update(self):
+            self.frame_count += 1
+            if self.frame_count >= 5:
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    expected_dt = 1.0 / 20.0
+    assert len(nav.dt_values) == 5
+    for dt_val in nav.dt_values:
+        assert abs(dt_val - expected_dt) < 1e-10, f"expected dt={expected_dt}, got {dt_val}"
+
+
+def test_play__system_tick__pacing():
+    """run_tick_hz controls actual execution speed."""
+    import time as time_module
+
+    scene = grx_lib.Scene()
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 0.0, -10.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 1.0, 0.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=100, height=100)
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, system_tick_hz=30.0, run_tick_hz=10.0)
+            self.frame_count = 0
+
+        def _update(self):
+            self.frame_count += 1
+            if self.frame_count >= 4:
+                self.exit()
+
+    play = Play([view])
+    t0 = time_module.perf_counter()
+    play.run()
+    elapsed = time_module.perf_counter() - t0
+
+    # 4 frames at 10Hz pacing: ticks scheduled at t+0, t+0.1, t+0.2, t+0.3
+    assert elapsed >= 0.25, f"expected >=0.25s with 10Hz pacing, got {elapsed:.3f}s"
+    assert elapsed < 2.0, f"took too long: {elapsed:.3f}s"
+
+
 #====================================================================
 # Running tests maunally
 #====================================================================

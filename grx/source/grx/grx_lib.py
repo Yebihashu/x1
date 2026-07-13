@@ -7,61 +7,15 @@ import collections
 import queue
 import atexit
 import math
+import time
 import numpy as np
 from grx import grx_math
-"""
-Design
+r"""
 ==================================================
-general
----------
-1. IMPORTANT:grx tends to be realtime 3d engine, so it should be fast and efficient.
-2. grx will be based on Panda3D engine. but can be changed if there is need to better performance.
-3. Coordinates system in grx is according to "\\grx\\source\\grx\\docs\\coordinates system.md"
-4. Units are meters and degrees.
-5. Colors are in RGBA format (0.0-1.0) for example: [1.0, 0.0, 0.0, 1.0] is red.
-6. transparency is supported. but can be disabled per object., or per scene.
-7. use numpy for efficient math library for calculations. can be changed if there is need to better performance.
-8. transform is 4x4 matrix in column major order.
-   this means, transforming a homogeniouse vector point is done by transform_matrix @ vector_point
-9. every SceneObject is dictionaried by unique name
-   if name is not given , it automatically generated uniqued name
-   if name is given, if it is not unique, it will be appended with a index to make it unique.
-10. Functions that tends to be called from player.update() function must be synced within the rendering thread
-    in order to allow fast and smooth rendering and responding to user input,
-    do not wait , but push commands to a queue and let the rendering thread handle them.
-11. All grx_lib objects uses log that allows queuing out log messages  with desired colors quickly without delaying the process,  
-    a logger that runs in different thread will ta care to handle the queuing and printing of the messages.
-    the logger can be configured to print to stdout, file, or both. (default is stdout only - so terminal in cursor can see the messages)
-    you can use a logger form known package or implement your own , but importance is the performance of grx_lib rendering and responding to user input.
-
-Architecture - threading & the command queue
----------------------------------------------
-To keep navigation/rendering fluid (even with two viewers) and to respond fast to
-user keyboard/mouse, grx uses a single rendering thread (the thread that runs
-``player.run()``) plus a thread-safe *command queue*.
-
-* The **data model** (Scene graph + numpy transforms) is the single source of
-  truth. It is updated immediately (under a lock) so reads such as
-  ``get_transform()`` are non-blocking, immediate and always consistent. This is
-  what the unit tests exercise, and it does not require a window/engine.
-
-* The **visual layer** (Panda3D nodes, camera, lights, background, snapshots) must
-  only be touched by the rendering thread. Every mutating call that affects the
-  visual layer therefore does NOT touch Panda3D directly. Instead it pushes a
-  command (a callable) onto the engine's command queue and returns immediately.
-  Once per frame the rendering thread drains the queue and applies the commands,
-  then runs ``player._update()``, then renders all viewers.
-
-This single mechanism (the command queue) is used *consistently* for every
-operation that needs to be synced with the rendering thread, so callers - whether
-they run on the render thread (inside ``player._update()``) or on another thread -
-never block the renderer.
-
-run_scene
-----------
-1. run_scene is the main function that will be used to run the scene.
-2. User navigation should be fluid and natural. without lags.
+Design - see design document: \x1\grx\source\grx\docs\grx design 1 - sync system.md
+==================================================
 """
+
 
 # =====================================================================
 # Coordinates system (see docs/coordinates system.md)
@@ -982,24 +936,42 @@ class player:
 
     The player updates the scene and renders it through one or more viewers. It
     attaches user navigators to camera objects, can save snapshots, and runs the
-    scene. Subclasses implement ``_update`` (called every frame on the rendering
-    thread).
+    scene. Subclasses implement ``_update`` (called once per system tick on the
+    rendering thread).
+
+    Args:
+        viewers        : list of Viewer objects (or a single Viewer).
+        system_tick_hz : logical simulation rate in Hz (default 30).
+        run_tick_hz    : wall-clock pacing rate in Hz (default: same as
+                         system_tick_hz; set to 0 for as-fast-as-possible).
     """
 
-    def __init__(self, viewers: List[Viewer]):
+    def __init__(self, viewers: List[Viewer],
+                 system_tick_hz: float = 30.0,
+                 run_tick_hz: Optional[float] = None):
         if isinstance(viewers, Viewer):
             viewers = [viewers]
         self.viewers: Dict[str, Viewer] = {v.name: v for v in viewers}
         self._navigators: List[UserNavigator] = []
         self._engine: Optional["_RenderEngine"] = None
+        if system_tick_hz <= 0:
+            raise ValueError("system_tick_hz must be positive")
+        self.system_tick_duration: float = 1.0 / system_tick_hz
+        if run_tick_hz is None:
+            self._run_tick_duration: float = self.system_tick_duration
+        elif run_tick_hz <= 0:
+            self._run_tick_duration = 0.0
+        else:
+            self._run_tick_duration = 1.0 / run_tick_hz
+        self.tick_count: int = 0
 
     # ---- to be implemented by subclasses -------------------------------
     def _update(self) -> None:
-        """ Is called before rendering a frame. allowing update scene, viewers, objects, etc
+        """Called once per system tick on the render thread.
 
-        Functions called here must be synced with the rendering thread (use the
-        scene/viewer/player API which pushes to the command queue). Implemented by
-        the inheriting class.
+        The simulation advances by exactly ``system_tick_duration`` each tick.
+        All logic should use this fixed step rather than wall-clock time.
+        Implemented by the inheriting class.
         """
         raise NotImplementedError("update must be implemented by inherent class.")
 
@@ -1095,8 +1067,8 @@ class _RenderEngine:
         self.base = None
         self._keys_down: Dict[str, bool] = {}
         self._scene_roots: Dict[int, object] = {}  # id(scene) -> NodePath
-        self._last_time: float = 0.0
         self._exit_requested: bool = False
+        self._start_time: Optional[float] = None
 
     # ---- thread-safe entry point ---------------------------------------
     def enqueue(self, command: Callable[[], None]) -> None:
@@ -1157,7 +1129,6 @@ class _RenderEngine:
             self._setup_viewer(viewer_obj)
 
         self._install_input()
-        self._last_time = 0.0
         self.base.taskMgr.add(self._frame_task, "grx_frame_task", sort=-50)
         log("[grx] engine started", "bright_green")
         self.base.run()
@@ -1165,14 +1136,27 @@ class _RenderEngine:
         self._teardown()
 
     def _frame_task(self, task):
-        dt = task.time - self._last_time
-        self._last_time = task.time
-        if dt < 0.0:
-            dt = 0.0
+        if self._start_time is None:
+            self._start_time = time.perf_counter()
+
+        if self.player._run_tick_duration > 0:
+            scheduled = self._start_time + self.player.tick_count * self.player._run_tick_duration
+            now = time.perf_counter()
+            if now < scheduled:
+                time.sleep(scheduled - now)
+
+        dt = self.player.system_tick_duration
 
         # 1) apply queued visual commands
         self._drain()
-        # 2) run user logic (may enqueue more commands)
+        # 2) run navigators first (their effects should be visible to _update)
+        for navigator in self.player._navigators:
+            try:
+                navigator.update(self, dt)
+            except Exception as exc:
+                log(f"[grx] navigator failed: {exc}", "red")
+        self._drain()
+        # 3) run user logic (may enqueue more commands)
         try:
             self.player._update()
         except NotImplementedError:
@@ -1180,18 +1164,12 @@ class _RenderEngine:
         except Exception as exc:
             log(f"[grx] player._update failed: {exc}", "red")
         self._drain()
-        # 3) run navigators
-        for navigator in self.player._navigators:
-            try:
-                navigator.update(self, dt)
-            except Exception as exc:
-                log(f"[grx] navigator failed: {exc}", "red")
-        self._drain()
         # 4) sync each viewer's camera transform from the data model
         for viewer_obj in self.player.viewers.values():
             self._update_viewer_camera_transform(viewer_obj)
 
         self._reset_mouse_delta()
+        self.player.tick_count += 1
 
         # 5) honor an exit request: drain once more, then stop the loop.
         if self._exit_requested:
