@@ -40,7 +40,7 @@ The current GRX design is synchronous with respect to rendering:
 
 - `player._update()` runs on the render thread.
 - `UserNavigator.update()` runs on the render thread.
-- `SceneObject.set_transform()` updates the Python scene state immediately and queues a Panda3D update command.
+- `SceneObject.set_transform()` updates the Python scene state immediately and marks the object for visual update at the next flush.
 - `Viewer` state changes (background, grid, lighting, enabled flag) update Python state immediately and queue a Panda3D update command.
 - `player.save_snapshot()` queues a render-thread snapshot command.
 
@@ -49,19 +49,74 @@ So the system is not a future async scene-packet design. Instead, it is a curren
 
 ## Why the command queue exists
 
-Panda3D objects must be touched only by the render thread. To avoid blocking and to keep `player._update()` usable from the same frame, GRX uses a queue of small callable commands.
-
-Examples:
+Panda3D objects must be touched only by the render thread. To avoid blocking and to keep `player._update()` usable from the same frame, GRX uses a queue of small callable commands for **structural and viewer operations**:
 
 ```python
 scene.spawn_object(...)      -> queue create_visual(...)
 scene.remove_object(...)     -> queue remove_visual(...)
-obj.set_transform(...)       -> queue _apply_transform_to_node()
 viewer.set_background_color() -> queue apply_background(...)
 viewer.set_grid_visible(True) -> queue apply_grid(...)
 ```
 
-The queue is drained inside the frame task, so queued changes are applied quickly and in order. This keeps the visual layer synchronized with the Python model without direct cross-thread Panda3D access.
+The queue is drained inside the frame task, so queued changes are applied quickly and in order.
+
+Per-object property updates such as `set_transform()` use a separate **aggregation system** (described below) instead of the command queue. This avoids redundant visual updates when the same property is set multiple times in one tick.
+
+
+## Command aggregation per object
+
+To avoid duplicated work inside one simulation tick, GRX **aggregates pending property updates per object**. When the same object receives multiple updates in the same tick, only the **latest value** survives until the visual flush.
+
+### Example
+
+```text
+object.set_transform(A)
+object.set_transform(B)
+object.set_transform(C)
+```
+
+At flush time, only transform C is applied to the Panda3D node. Transforms A and B are never sent to Panda3D.
+
+### Per-object dirty tracking
+
+Each scene object stores:
+
+- `_dirty_transform`: whether the object's transform has been modified since the last flush
+- `_last_dirty_tick`: the tick number when the object was last added to the dirty list
+
+The engine maintains a `_dirty_objects` list of objects that have pending property updates.
+
+When a setter modifies an object:
+
+1. The Python model is updated immediately (as before)
+2. The dirty flag for that property is set on the object
+3. If the object hasn't been dirtied yet this tick (checked via `_last_dirty_tick != tick_count`), it is appended to the dirty list
+
+This guarantees each object appears at most once in the dirty list regardless of how many setters are called during the tick.
+
+### Flush
+
+At the end of each tick, after all user code and structural command drains, the engine flushes the dirty list:
+
+```text
+for each object in dirty_objects:
+    if object has dirty transform and a valid visual node:
+        apply transform to Panda3D node
+        clear dirty flag
+clear dirty_objects list
+```
+
+No scene-wide scan is required. Each object is processed at most once per tick.
+
+### Structural vs. property operations
+
+- **Property operations** (`set_transform`, and future `set_color`, `set_visible`, etc.) use the aggregation system: they update the Python model immediately and mark the object dirty for the next flush.
+- **Structural operations** (`spawn_object`, `remove_object`) use the command queue: they enqueue a command that creates or destroys the visual representation.
+- **Viewer operations** (`set_background_color`, `set_grid`, etc.) use the command queue.
+
+### Performance
+
+The complexity of the flush is O(number of modified objects) per tick, not O(number of setter calls) or O(number of scene objects). This makes the implementation efficient even for large scenes where only a small fraction of objects change every tick.
 
 
 ## Frame flow in the current engine
@@ -70,24 +125,26 @@ The current render loop in `_RenderEngine._frame_task()` is:
 
 ```text
 0. Pace: sleep until the scheduled wall-clock time for this tick
-1. Drain queued visual commands
+1. Drain queued visual commands (structural and viewer operations)
 2. Run all user navigators (dt = system_tick_duration, fixed)
 3. Drain queued visual commands again
 4. Run player._update()
 5. Drain queued visual commands again
-6. Sync camera transforms from the Python scene to Panda3D cameras
-7. Reset mouse delta
-8. Increment tick count
-9. Handle exit request if needed
+6. Flush dirty object properties (aggregated transform updates)
+7. Sync camera transforms from the Python scene to Panda3D cameras
+8. Reset mouse delta
+9. Increment tick count
+10. Handle exit request if needed
 ```
 
 This order is important:
 
 - Pacing ensures the simulation runs at the configured wall-clock rate.
-- Commands queued before the frame are applied first.
+- Structural and viewer commands queued before the frame are applied first.
 - Navigators can modify camera transforms early in the frame, using the fixed system tick as delta time.
 - `player._update()` can freely modify scene objects and viewers while seeing the
   latest navigator effects.
+- After all user code finishes, the dirty flush applies only the final property values to Panda3D nodes.
 - Camera NodePaths are synced at the end of the frame from the authoritative Python camera objects.
 - The tick count increments after each completed tick, so `_update()` can read the current tick via `player.tick_count`.
 
@@ -461,7 +518,7 @@ The current GRX sync system is built around these rules:
 
 - one render thread drives Panda3D
 - Python scene state is updated immediately
-- Panda3D state is synchronized through a render-thread command queue
+- Panda3D state is synchronized through a render-thread command queue (structural/viewer ops) and per-object dirty aggregation (property updates)
 - `player._update()` and navigators run on the render thread
 - simulation advances by a fixed system tick per frame, independent of wall-clock time
 - execution pacing is configurable (real-time, slower, faster, or as-fast-as-possible)
@@ -469,4 +526,3 @@ The current GRX sync system is built around these rules:
 - logging stays non-blocking through a separate logger thread
 
 This is the current practical design used by `grx_lib.py`.
-

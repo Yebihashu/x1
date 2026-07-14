@@ -288,6 +288,8 @@ class SceneObject:
         self._visible: bool = True
         # Panda3D NodePath, created by the rendering thread. None until then.
         self._nodepath = None
+        self._dirty_transform: bool = False
+        self._last_dirty_tick: int = -1
 
     # ---- identity -------------------------------------------------------
     @property
@@ -339,8 +341,8 @@ class SceneObject:
         reference_object can be a SceneObject, a string name, or None.
         If None, the transform is relative to the scene (world).
 
-        The data model is updated immediately; a command to update the visual
-        node is pushed to the rendering thread's queue.
+        The data model is updated immediately; the object is marked dirty so
+        the visual node is updated at the next flush.
         """
         transform = as_transform(transform)
         reference = self._resolve_reference(reference_object)
@@ -354,8 +356,9 @@ class SceneObject:
         else:
             self.transform_local = relative_transform(target_world, self._parent.world_transform())
 
+        self._dirty_transform = True
         if self._scene is not None:
-            self._scene._enqueue(lambda: self._apply_transform_to_node())
+            self._scene._mark_dirty(self)
 
     # ---- backward compatible aliases (stub spelling) --------------------
     def get_tranform(self, reference_object: Union["SceneObject", str, None] = None) -> np.ndarray:
@@ -617,6 +620,12 @@ class Scene:
         engine = self._engine
         if engine is not None:
             engine.enqueue(command)
+
+    def _mark_dirty(self, obj: SceneObject) -> None:
+        """Mark an object's pending property updates for the next flush."""
+        engine = self._engine
+        if engine is not None:
+            engine._mark_object_dirty(obj)
 
     # ---- mutations (API callable from player.update) -------------------
     def spawn_object(self,
@@ -1069,6 +1078,7 @@ class _RenderEngine:
         self._scene_roots: Dict[int, object] = {}  # id(scene) -> NodePath
         self._exit_requested: bool = False
         self._start_time: Optional[float] = None
+        self._dirty_objects: List[SceneObject] = []
 
     # ---- thread-safe entry point ---------------------------------------
     def enqueue(self, command: Callable[[], None]) -> None:
@@ -1089,6 +1099,19 @@ class _RenderEngine:
                 command()
             except Exception as exc:  # never let a bad command kill the renderer
                 log(f"[grx] command failed: {exc}", "red")
+
+    def _mark_object_dirty(self, obj: SceneObject) -> None:
+        tick = self.player.tick_count
+        if obj._last_dirty_tick != tick:
+            obj._last_dirty_tick = tick
+            self._dirty_objects.append(obj)
+
+    def _flush_dirty_objects(self) -> None:
+        for obj in self._dirty_objects:
+            if obj._dirty_transform and obj._nodepath is not None:
+                obj._apply_transform_to_node()
+                obj._dirty_transform = False
+        self._dirty_objects.clear()
 
     # ---- lifecycle ------------------------------------------------------
     def start(self) -> None:
@@ -1164,6 +1187,7 @@ class _RenderEngine:
         except Exception as exc:
             log(f"[grx] player._update failed: {exc}", "red")
         self._drain()
+        self._flush_dirty_objects()
         # 4) sync each viewer's camera transform from the data model
         for viewer_obj in self.player.viewers.values():
             self._update_viewer_camera_transform(viewer_obj)
@@ -1338,6 +1362,7 @@ class _RenderEngine:
             nodepath.reparentTo(scene._render_root)
         obj._nodepath = nodepath
         obj._apply_transform_to_node()
+        obj._dirty_transform = False
         # build children that may already exist
         for child in obj._children:
             self._build_object_visual(scene, child)

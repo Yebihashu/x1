@@ -795,6 +795,159 @@ def test_play__system_tick__pacing():
     assert elapsed < 2.0, f"took too long: {elapsed:.3f}s"
 
 
+def test_play__command_aggregation__last_value_wins():
+    """Multiple set_transform calls in one tick: only the final value is rendered."""
+    width, height = 200, 100
+    images_buffer = grx_lib.ImagesBuffer(num_images=1, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 100.0, 0.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 0.0, 1.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    cube = grx_lib.Cube(name="cube", size=[1.0, 2.0, 0.5], color=[1.0, 1.0, 1.0, 1.0])
+    scene.spawn_object(cube, transform=grx_lib.translation_transform(-0.5, 1.0, 0.25))
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, run_tick_hz=0)
+            self.update_calls = 0
+            self.captured = False
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                cube.set_transform(grx_lib.translation_transform(0.5, 1.0, 0.25))
+                cube.set_transform(grx_lib.translation_transform(-0.5, 1.0, -0.25))
+                cube.set_transform(grx_lib.translation_transform(0.5, 1.0, -0.25))
+            elif self.update_calls == 3:
+                self.captured = self.get_viewer_image("view", images_buffer, 0)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert play.captured
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__command_aggregation__last_value_wins")
+    frame = images[0]
+
+    assert is_white(frame[50:100, 100:200]), "cube should be in bottom-right (final transform)"
+    assert is_blue(frame[0:50, 0:100]), "top-left should be blue"
+    assert is_blue(frame[50:100, 0:100]), "bottom-left should be blue"
+    assert is_blue(frame[0:50, 100:200]), "top-right should be blue"
+
+
+def test_play__command_aggregation__multiple_objects():
+    """Changes to multiple objects in one tick are all applied correctly."""
+    width, height = 200, 100
+    images_buffer = grx_lib.ImagesBuffer(num_images=2, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 100.0, 0.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 0.0, 1.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    cube1 = grx_lib.Cube(name="cube1", size=[1.0, 2.0, 0.5], color=[1.0, 1.0, 1.0, 1.0])
+    cube2 = grx_lib.Cube(name="cube2", size=[1.0, 2.0, 0.5], color=[1.0, 1.0, 1.0, 1.0])
+    scene.spawn_object(cube1, transform=grx_lib.translation_transform(-0.5, 1.0, 0.25))
+    scene.spawn_object(cube2, transform=grx_lib.translation_transform(0.5, 1.0, -0.25))
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, run_tick_hz=0)
+            self.update_calls = 0
+            self.captured = [False, False]
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                self.captured[0] = self.get_viewer_image("view", images_buffer, 0)
+                cube1.set_transform(grx_lib.translation_transform(0.5, 1.0, 0.25))
+                cube2.set_transform(grx_lib.translation_transform(-0.5, 1.0, -0.25))
+            elif self.update_calls == 3:
+                self.captured[1] = self.get_viewer_image("view", images_buffer, 1)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert all(play.captured)
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__command_aggregation__multi_obj_frame0")
+    _debug_save_image(images[1], "test_play__command_aggregation__multi_obj_frame1")
+
+    frame0 = images[0]
+    frame1 = images[1]
+
+    assert is_white(frame0[0:50, 0:100]), "frame0: cube1 should be at top-left"
+    assert is_white(frame0[50:100, 100:200]), "frame0: cube2 should be at bottom-right"
+    assert is_blue(frame0[0:50, 100:200]), "frame0: top-right should be blue"
+    assert is_blue(frame0[50:100, 0:100]), "frame0: bottom-left should be blue"
+
+    assert is_white(frame1[0:50, 100:200]), "frame1: cube1 should be at top-right"
+    assert is_white(frame1[50:100, 0:100]), "frame1: cube2 should be at bottom-left"
+    assert is_blue(frame1[0:50, 0:100]), "frame1: top-left should be blue"
+    assert is_blue(frame1[50:100, 100:200]), "frame1: bottom-right should be blue"
+
+
+def test_play__command_aggregation__remove_dirty_object():
+    """Setting transform then removing in the same tick does not crash."""
+    width, height = 200, 100
+    images_buffer = grx_lib.ImagesBuffer(num_images=1, width=width, height=height, channels=3)
+
+    camera_transform = grx_math.look_at_transform(
+        position=np.array([0.0, 100.0, 0.0]),
+        look_at_position=np.array([0.0, 0.0, 0.0]),
+        strive_up=np.array([0.0, 0.0, 1.0]))
+    camera = grx_lib.OrthographicCamera(name="cam", transform=camera_transform,
+                                        width=width, height=height)
+
+    scene = grx_lib.Scene()
+    cube = grx_lib.Cube(name="cube", size=[1.0, 2.0, 0.5], color=[1.0, 1.0, 1.0, 1.0])
+    scene.spawn_object(cube, transform=grx_lib.translation_transform(-0.5, 1.0, 0.25))
+
+    view = grx_lib.Viewer(name="view", scene=scene, camera=camera, headless=True)
+    view.set_background_color(grx_lib.BLUE)
+
+    class Play(grx_lib.player):
+        def __init__(self, viewers):
+            super().__init__(viewers, run_tick_hz=0)
+            self.update_calls = 0
+            self.captured = False
+
+        def _update(self):
+            self.update_calls += 1
+            if self.update_calls == 2:
+                cube.set_transform(grx_lib.translation_transform(0.5, 1.0, 0.25))
+                scene.remove_object(cube)
+            elif self.update_calls == 3:
+                self.captured = self.get_viewer_image("view", images_buffer, 0)
+                self.exit()
+
+    play = Play([view])
+    play.run()
+
+    assert play.captured
+    images = images_buffer.copy_to_cpu()
+    _debug_save_image(images[0], "test_play__command_aggregation__remove_dirty")
+    frame = images[0]
+
+    assert is_blue(frame), "after removing the only object, entire image should be blue"
+
+
 #====================================================================
 # Running tests maunally
 #====================================================================
